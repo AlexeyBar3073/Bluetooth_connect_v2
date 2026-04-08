@@ -199,6 +199,7 @@ static void processIncoming(QueueHandle_t q, DataBus& db) {
             c["kl_proto"] = cfg.kl_proto; c["fw"] = FW_VERSION_STR;
             serializeJson(resp, outBuffer, sizeof(outBuffer));
             strlcat(outBuffer, "\n", sizeof(outBuffer));
+            outBuffer[sizeof(outBuffer) - 1] = '\0';  // Гарантированная null-терминация
             Serial.printf("[Protocol] <<< TX: %s", outBuffer);
             db.publish(TOPIC_MSG_OUTGOING, outBuffer);
             continue;
@@ -233,6 +234,7 @@ static void processIncoming(QueueHandle_t q, DataBus& db) {
                 lastMsgId = 0;  // Квитанция отправлена
                 serializeJson(resp, outBuffer, sizeof(outBuffer));
                 strlcat(outBuffer, "\n", sizeof(outBuffer));
+                outBuffer[sizeof(outBuffer) - 1] = '\0';  // Гарантированная null-терминация
             }
             db.publish(TOPIC_MSG_OUTGOING, outBuffer);
             continue;
@@ -277,6 +279,7 @@ static void processIncoming(QueueHandle_t q, DataBus& db) {
                 lastMsgId = 0;  // Квитанция отправлена (с ошибкой)
                 serializeJson(resp, outBuffer, sizeof(outBuffer));
                 strlcat(outBuffer, "\n", sizeof(outBuffer));
+                outBuffer[sizeof(outBuffer) - 1] = '\0';  // Гарантированная null-терминация
                 db.publish(TOPIC_MSG_OUTGOING, outBuffer);
                 continue;
             }
@@ -291,6 +294,7 @@ static void processIncoming(QueueHandle_t q, DataBus& db) {
             lastMsgId = 0;  // Квитанция отправлена
             serializeJson(resp, outBuffer, sizeof(outBuffer));
             strlcat(outBuffer, "\n", sizeof(outBuffer));
+            outBuffer[sizeof(outBuffer) - 1] = '\0';  // Гарантированная null-терминация
         }
         db.publish(TOPIC_MSG_OUTGOING, outBuffer);
     }
@@ -322,6 +326,7 @@ static void sendFast(DataBus& db) {
 
     serializeJson(doc, outBuffer, sizeof(outBuffer));
     strlcat(outBuffer, "\n", sizeof(outBuffer));
+    outBuffer[sizeof(outBuffer) - 1] = '\0';  // Гарантированная null-терминация
     db.publish(TOPIC_MSG_OUTGOING, outBuffer);
 
     // Отладка: первое сообщение — выводим JSON полностью
@@ -355,6 +360,7 @@ static void sendTrip(DataBus& db) {
     t["avg"] = roundf(tel.avg * 10) / 10;
     serializeJson(doc, outBuffer, sizeof(outBuffer));
     strlcat(outBuffer, "\n", sizeof(outBuffer));
+    outBuffer[sizeof(outBuffer) - 1] = '\0';  // Гарантированная null-терминация
     db.publish(TOPIC_MSG_OUTGOING, outBuffer);
 }
 

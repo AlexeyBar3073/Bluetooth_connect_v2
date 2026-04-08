@@ -25,9 +25,10 @@ void btTransportTask(void* parameter) {
     isRunningFlag = true;
     DataBus& db = DataBus::getInstance();
 
-    // Подписка на исходящие данные (OVERWRITE, depth=1)
-    // Всегда актуальное сообщение. ACK отправляется в составе телеметрии.
-    SubscriberOpts txOpts = {QUEUE_OVERWRITE, 1, false};
+    // Подписка на исходящие данные (FIFO_DROP, depth=5)
+    // ACK-квитанции и телеметрия идут в одной очереди.
+    // FIFO гарантирует что ACK не будет перезаписан телеметрией.
+    SubscriberOpts txOpts = {QUEUE_FIFO_DROP, 5, false};
     QueueHandle_t txQueue = db.subscribe(TOPIC_MSG_OUTGOING, txOpts);
 
     Serial.println("[BT Transport] Task running (Queue-based)");
@@ -57,30 +58,37 @@ void btTransportTask(void* parameter) {
         }
 
         // --- TX: DataBus → SerialBT ---
-        // Отправляем без проверки буфера. Если буфер полон — println() вернёт 0.
+        // Проверяем буфер ПЕРЕД извлечением из очереди, чтобы не потерять сообщение.
         if (SerialBT.hasClient()) {
             BusMessage msg;
-            if (txQueue && xQueueReceive(txQueue, &msg, 0) == pdTRUE) {
+            // peek() смотрит сообщение, не удаляя его
+            if (txQueue && xQueuePeek(txQueue, &msg, 0) == pdTRUE) {
                 if (msg.type == TYPE_STRING) {
-                    size_t sent = SerialBT.println(msg.value.s);
-                    // --- Логирование ack_id для отладки ---
-                    static int lastAckId = -1;
-                    static int txCount = 0;
-                    txCount++;
+                    size_t len = strlen(msg.value.s) + 2;  // +2 для \r\n
+                    if (SerialBT.availableForWrite() >= len) {
+                        // Буфер готов — извлекаем и отправляем
+                        xQueueReceive(txQueue, &msg, 0);
+                        SerialBT.println(msg.value.s);
 
-                    // Ищем "ack_id":N (число)
-                    const char* ackPtr = strstr(msg.value.s, "\"ack_id\":");
-                    if (ackPtr) {
-                        ackPtr += 9;  // пропускаем "\"ack_id\":"
-                        int currentAck = atoi(ackPtr);
-                        if (currentAck != lastAckId) {
-                            lastAckId = currentAck;
-                            Serial.printf("[BT TX] #%d ack_id=%d sent=%zu\n", txCount, lastAckId, sent);
+                        // --- Логирование ack_id ---
+                        static int lastAckId = -1;
+                        static int txCount = 0;
+                        txCount++;
+                        const char* ackPtr = strstr(msg.value.s, "\"ack_id\":");
+                        if (ackPtr) {
+                            ackPtr += 9;
+                            int currentAck = atoi(ackPtr);
+                            if (currentAck != lastAckId) {
+                                lastAckId = currentAck;
+                                Serial.printf("[BT TX] #%d ack_id=%d\n", txCount, lastAckId);
+                            }
                         }
-                    } else if (txCount <= 3) {
-                        Serial.printf("[BT TX] #%d (нет ack_id) sent=%zu: %s\n", txCount, sent, msg.value.s);
+                        // --- Конец логирования ---
                     }
-                    // --- Конец логирования ---
+                    // Иначе: оставляем в очереди, ждём следующего цикла
+                } else {
+                    // Не строка — извлекаем и игнорируем
+                    xQueueReceive(txQueue, &msg, 0);
                 }
             }
         }
