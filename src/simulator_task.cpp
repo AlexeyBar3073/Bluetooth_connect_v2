@@ -68,6 +68,7 @@ static float  tankCapacity     = 60.0f;
 // --- Фильтр АЦП ---
 static float  filteredRaw      = 0.0f;
 static const float ALPHA       = 0.2f;
+static bool   pedalConnected   = false;  // true = потенциометр подключён
 
 // --- Таймеры ---
 static unsigned long lastPhysicsTime  = 0;
@@ -126,14 +127,24 @@ static float getInstantFuel() {
 static void processCommands(QueueHandle_t cmdQueue) {
     BusMessage msg;
     while (xQueueReceive(cmdQueue, &msg, 0) == pdTRUE) {
-        if (msg.type != TYPE_CMD) continue;
+        // Protocol публикует простые команды как int, а параметрические — как CmdPayload
+        Command cmd;
+        if (msg.type == TYPE_INT) {
+            cmd = (Command)msg.value.i;
+        } else if (msg.type == TYPE_CMD) {
+            cmd = msg.cmd.cmd;
+        } else {
+            busMessageFree(&msg);
+            continue;
+        }
 
-        if (msg.cmd.cmd == CMD_FULL_TANK) {
+        if (cmd == CMD_FULL_TANK) {
             fuelBase = tankCapacity;
             currentFuelUsed = 0.0f;
             fuelLevelSensor = roundf(fuelBase * 10.0f) / 10.0f;
             Serial.printf("[Simulator] Full tank: fuelBase = %.1f L\n", fuelBase);
         }
+        busMessageFree(&msg);
     }
 }
 
@@ -164,6 +175,29 @@ void simulatorTask(void* parameter) {
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
 
+    // Калибровка педали газа: 20 замеров, проверка стабильности
+    // Если разброс > 200 — пин плавает (нет подтяжки), считаем отключённым
+    {
+        int sum = 0, minV = 4095, maxV = 0;
+        for (int i = 0; i < 20; i++) {
+            int v = analogRead(POTENTIOMETER_PIN);
+            sum += v;
+            if (v < minV) minV = v;
+            if (v > maxV) maxV = v;
+            delay(2);
+        }
+        int avg = sum / 20;
+        int spread = maxV - minV;
+        pedalConnected = (spread < 200 && avg < 4000);
+        Serial.printf("[Simulator] Pedal ADC: avg=%d spread=%d %s\n",
+                      avg, spread, pedalConnected ? "CONNECTED" : "DISCONNECTED (floating)");
+        if (!pedalConnected) {
+            filteredRaw = 0.0f;  // Принудительный 0 throttle
+        } else {
+            filteredRaw = (float)avg;
+        }
+    }
+
     // Подписка на команды (FIFO_DROP, depth=5)
     SubscriberOpts cmdOpts = {QUEUE_FIFO_DROP, 5, false};
     QueueHandle_t cmdQueue = db.subscribe(TOPIC_CMD, cmdOpts);
@@ -176,8 +210,8 @@ void simulatorTask(void* parameter) {
     SubscriberOpts cfgOpts = {QUEUE_OVERWRITE, 1, true};
     QueueHandle_t cfgQueue = db.subscribe(TOPIC_SETTINGS_PACK, cfgOpts);
 
-    // Публикация not_fuel = true (виртуальный расчёт)
-    db.publish(TOPIC_NOT_FUEL, true);
+    // Публикация not_fuel = true (виртуальный расчёт топлива)
+    // Это поле теперь в EnginePack, а не в отдельном топике.
 
     Serial.println("[Simulator] Task started (Queue-based)");
 
@@ -292,7 +326,7 @@ void simulatorTask(void* parameter) {
 
             EnginePack pack;
             memset(&pack, 0, sizeof(pack));
-            pack.version           = 2;
+            pack.version           = 1;
             pack.speed             = currentSpeed;
             pack.rpm               = roundf(currentRpm / 10.0f) * 10.0f;
             pack.voltage           = getVoltage();
@@ -302,6 +336,7 @@ void simulatorTask(void* parameter) {
             pack.distance          = currentDistance;
             pack.fuel_used         = currentFuelUsed;
             pack.fuel_level_sensor = fuelLevelSensor;  // Округлён до 0.1 л
+            pack.not_fuel          = true;             // Датчика нет, Simulator считает сам
             pack.gear              = 0;
             strcpy(pack.selector_pos, "D");
             pack.tcc_lockup        = false;
@@ -317,11 +352,12 @@ void simulatorTask(void* parameter) {
         if (tripQ && xQueueReceive(tripQ, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
             TripPack p;
             memcpy(&p, msg.value.s, sizeof(TripPack));
-            if (p.fuel_level > 0 && fuelBase < 0.1f) {  // Первый раз
+            if (p.fuel_level > 0 && fuelBase < 0.1f) {
                 fuelBase = p.fuel_level;
                 fuelLevelSensor = fuelBase;
                 Serial.printf("[Simulator] fuel_base from Storage: %.1f L\n", fuelBase);
             }
+            busMessageFree(&msg);
         }
 
         // ====== 8. Чтение настроек ======
@@ -331,6 +367,7 @@ void simulatorTask(void* parameter) {
                 SettingsPack pack;
                 memcpy(&pack, msg.value.s, sizeof(SettingsPack));
                 tankCapacity = pack.tank_capacity;
+                busMessageFree(&msg);
             }
         }
 
@@ -370,3 +407,4 @@ void simulatorSetSpeed(float speed) { currentSpeed = speed; }
 void simulatorSetFuel(float fuel) { (void)fuel; }
 void simulatorToggleEngine() { engineRunning = !engineRunning; }
 bool simulatorIsEngineRunning() { return engineRunning; }
+

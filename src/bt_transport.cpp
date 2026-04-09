@@ -27,8 +27,8 @@ void btTransportTask(void* parameter) {
 
     // Подписка на исходящие данные (FIFO_DROP, depth=5)
     // ACK-квитанции и телеметрия идут в одной очереди.
-    // FIFO гарантирует что ACK не будет перезаписан телеметрией.
-    SubscriberOpts txOpts = {QUEUE_FIFO_DROP, 5, false};
+    // FIFO_DROP, depth=3 — достаточно для буферизации ACK + телеметрии
+    SubscriberOpts txOpts = {QUEUE_FIFO_DROP, 3, false};
     QueueHandle_t txQueue = db.subscribe(TOPIC_MSG_OUTGOING, txOpts);
 
     Serial.println("[BT Transport] Task running (Queue-based)");
@@ -58,19 +58,28 @@ void btTransportTask(void* parameter) {
         }
 
         // --- TX: DataBus → SerialBT ---
-        // Проверяем буфер ПЕРЕД извлечением из очереди, чтобы не потерять сообщение.
+        // SerialBT.availableForWrite() не работает для SPP — всегда 0.
+        // Отправляем напрямую, проверяем результат записи.
         if (SerialBT.hasClient()) {
             BusMessage msg;
-            // peek() смотрит сообщение, не удаляя его
-            if (txQueue && xQueuePeek(txQueue, &msg, 0) == pdTRUE) {
+            if (txQueue && xQueueReceive(txQueue, &msg, pdMS_TO_TICKS(50)) == pdTRUE) {
                 if (msg.type == TYPE_STRING) {
-                    size_t len = strlen(msg.value.s) + 2;  // +2 для \r\n
-                    if (SerialBT.availableForWrite() >= len) {
-                        // Буфер готов — извлекаем и отправляем
-                        xQueueReceive(txQueue, &msg, 0);
-                        SerialBT.println(msg.value.s);
-
-                        // --- Логирование ack_id ---
+                    // Данные уже содержат \n от Protocol. Используем print(),
+                    // чтобы избежать двойного \r\n от println().
+                    size_t sent = SerialBT.print(msg.value.s);
+                    if (sent == 0) {
+                        // SPP буфер переполнен — Android не потребляет данные.
+                        // Не логируем каждый раз, чтобы не спамить Serial.
+                        static unsigned long lastCongestionLog = 0;
+                        unsigned long now = millis();
+                        if (now - lastCongestionLog > 5000) {
+                            lastCongestionLog = now;
+                            Serial.printf("[BT TX] SPP congested! Android не читает (%zu/%zu sent)\n",
+                                          sent, strlen(msg.value.s));
+                        }
+                    }
+                    // --- Логирование ack_id (только при успешной отправке) ---
+                    if (sent > 0) {
                         static int lastAckId = -1;
                         static int txCount = 0;
                         txCount++;
@@ -83,13 +92,10 @@ void btTransportTask(void* parameter) {
                                 Serial.printf("[BT TX] #%d ack_id=%d\n", txCount, lastAckId);
                             }
                         }
-                        // --- Конец логирования ---
                     }
-                    // Иначе: оставляем в очереди, ждём следующего цикла
-                } else {
-                    // Не строка — извлекаем и игнорируем
-                    xQueueReceive(txQueue, &msg, 0);
+                    // --- Конец логирования ---
                 }
+                busMessageFree(&msg);
             }
         }
 
@@ -103,6 +109,10 @@ void btTransportTask(void* parameter) {
 
 void btTransportStart(const char* deviceName) {
     if (btTaskHandle) return;
+
+    // Задержка перед инициализацией BT — обход бага ESP-IDF HCI HAL crash
+    Serial.printf("[BT Transport] Delaying init to avoid HCI crash...\n");
+    delay(500);
 
     Serial.printf("[BT Transport] Initializing '%s'...\n", deviceName);
     if (!SerialBT.begin(deviceName)) {
@@ -127,3 +137,8 @@ void btTransportStop() {
 }
 
 bool btIsConnected() { return SerialBT.hasClient(); }
+bool btSend(const char* data) {
+    if (!SerialBT.hasClient()) return false;
+    return SerialBT.print(data) > 0;
+}
+

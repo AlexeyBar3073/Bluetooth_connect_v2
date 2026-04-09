@@ -3,10 +3,20 @@
 // Модуль климата и сервисных датчиков.
 //
 // Назначение:
-// - Публикует ServicePack в TOPIC_SERVICE_PACK каждые 1000 мс
+// - Публикует ClimatePack в TOPIC_CLIMATE_PACK каждые 1000 мс
 // - Режим симуляции: тестовые данные
 //
-// ВЕРСИЯ: 5.0.0 — MAJOR: Queue-архитектура, ServicePack
+// ВАЖНО: Climate НЕ формирует JSON! Он публикует ClimatePack в свой топик.
+// Protocol Task подписан, собирает SERVICE JSON.
+//
+// -----------------------------------------------------------------------------
+// ПРАВИЛА ФАЙЛА:
+// -----------------------------------------------------------------------------
+// ❌ нельзя:
+//   - Формировать JSON или публиковать в TOPIC_MSG_OUTGOING
+//   - Оперировать msg_id / ack_id
+//
+// ВЕРСИЯ: 5.1.0 — MAJOR: Публикация ClimatePack (не ServicePack)
 // -----------------------------------------------------------------------------
 
 #include "climate.h"
@@ -36,8 +46,8 @@ static void updateTestData() {
 // climateTask — Главная задача
 // =============================================================================
 //
-// Публикует ServicePack каждые 1000 мс.
-// Данные климата дополняют данные от K-Line (temperatures, DTC).
+// Публикует ClimatePack каждые 1000 мс.
+// Данные климата НЕ пересекаются с KlinePack — каждый модуль в своём топике.
 //
 void climateTask(void* parameter) {
     (void)parameter;
@@ -56,19 +66,15 @@ void climateTask(void* parameter) {
             lastPublish = now;
             updateTestData();
 
-            // Публикуем ТОЛЬКО климат-поля, остальные (coolant, atf, dtc) — от K-Line
-            // Но ServicePack — единый пакет. K-Line публикует свой,
-            // Protocol Task объединяет в кэше.
-            ServicePack pack;
+            ClimatePack pack;
             memset(&pack, 0, sizeof(pack));
             pack.version = 1;
             pack.interior_temp = testInterior;
             pack.exterior_temp = testExterior;
             pack.tire_pressure = testTire;
             pack.washer_level = testWash;
-            // coolant_temp, atf_temp, dtc — нули (K-Line заполнит свой ServicePack)
 
-            db.publishPacket(TOPIC_SERVICE_PACK, &pack, sizeof(pack));
+            db.publishPacket(TOPIC_CLIMATE_PACK, &pack, sizeof(pack));
         }
 
         vTaskDelay(100 / portTICK_PERIOD_MS);

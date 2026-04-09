@@ -42,10 +42,10 @@
 // BUILD (0) — Исправление ошибок
 //
 #define FW_VERSION_MAJOR 5
-#define FW_VERSION_MINOR 0
+#define FW_VERSION_MINOR 1
 #define FW_VERSION_BUILD 0
-#define FW_VERSION_STR   "5.0.0"
-#define FW_VERSION_NOTE  "MAJOR: Packet-based architecture (EnginePack, TripPack, ServicePack, SettingsPack)"
+#define FW_VERSION_STR   "5.1.0"
+#define FW_VERSION_NOTE  "KlinePack/ClimatePack split, Protocol-only ack_id, fractional telemetry"
 
 // =============================================================================
 // Аппаратные пины
@@ -90,7 +90,7 @@
 // =============================================================================
 
 #define TASK_STACK_SIZE       4096   // Стандартный размер стека (байт)
-#define TASK_STACK_PROTOCOL   8192   // Protocol (ArduinoJson требует больше)
+#define TASK_STACK_PROTOCOL   6144   // Protocol (ArduinoJson требует больше)
 #define TASK_STACK_CLIMATE    2048   // Climate (минимальный стек)
 
 #endif // APP_CONFIG_H

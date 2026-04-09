@@ -62,7 +62,7 @@ static float   current_fuel_used = 0.0f;
 static float   fuel_level_sensor = 0.0f;  // Рассчитан EngineModule/Simulator
 
 // --- Статусы ---
-static bool    not_fuel          = false;  // true = датчика нет, считаем сами
+static bool    not_fuel          = false;  // true = датчика топлива нет (из EnginePack.not_fuel)
 static bool    engineRunning     = false;
 
 // --- Настройки ---
@@ -73,12 +73,10 @@ static float   tank_capacity     = 60.0f;
 // =============================================================================
 static void processEnginePack(QueueHandle_t q) {
     BusMessage msg;
-    // Читаем последнее (OVERWRITE queue, depth=1)
     if (xQueueReceive(q, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
         EnginePack pack;
         memcpy(&pack, msg.value.s, sizeof(EnginePack));
 
-        // При запуске двигателя — сброс накопленных
         if (pack.engine_running && !engineRunning) {
             current_distance  = 0.0f;
             current_fuel_used = 0.0f;
@@ -87,30 +85,43 @@ static void processEnginePack(QueueHandle_t q) {
         current_distance  = pack.distance;
         current_fuel_used = pack.fuel_used;
         fuel_level_sensor = pack.fuel_level_sensor;
+        not_fuel = pack.not_fuel;  // Датчик топлива присутствует/отсутствует
+        busMessageFree(&msg);
     }
 }
 
 // =============================================================================
 // processTripPack: Чтение TripPack от Storage (base-значения)
 // =============================================================================
+// ВАЖНО: обновляем base ТОЛЬКО если значение пришло извне (Storage, set_cfg).
+// Не обновляем trip-базы из собственного TripPack — это вызовет квадратичный рост!
+//
+// Признак "извне": odo > 0 И двигатель ещё не запущен (первый запуск).
+// После запуска двигателя — base НЕ меняется до команд reset_*.
+//
 static void processTripPack(QueueHandle_t q) {
     BusMessage msg;
     if (xQueueReceive(q, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
         TripPack pack;
         memcpy(&pack, msg.value.s, sizeof(TripPack));
 
-        // Защита от перезапуска Storage: обновляем base только если больше текущего
-        double odo_calc = odo_base + current_distance;
-        if ((double)pack.odo > odo_calc + 0.01) {
+        // Обновляем base только при первом старте (engine ещё не running, odo_base ещё 0)
+        // Это защищает от обновления своим же пакетом
+        if (odo_base == 0.0 && pack.odo > 0.01 && !engineRunning) {
             odo_base = pack.odo;
+            trip_a_base = pack.trip_a;
+            trip_b_base = pack.trip_b;
+            fuel_trip_a_base = pack.fuel_trip_a;
+            fuel_trip_b_base = pack.fuel_trip_b;
+            avg_stored = pack.avg_consumption;
+            Serial.printf("[Calculator] TripPack base from storage: ODO=%.0f\n", odo_base);
         }
 
-        trip_a_base      = pack.trip_a;
-        trip_b_base      = pack.trip_b;
-        fuel_trip_a_base = pack.fuel_trip_a;
-        fuel_trip_b_base = pack.fuel_trip_b;
-        avg_stored       = pack.avg_consumption;
-        if (not_fuel) fuel_base = pack.fuel_level;
+        // fuel_level берём из TripPack только если нет датчика (not_fuel = true)
+        // и двигатель ещё не запущен — иначе будет цикл пересчёта
+        if (not_fuel && !engineRunning) fuel_base = pack.fuel_level;
+
+        busMessageFree(&msg);
     }
 }
 
@@ -122,17 +133,33 @@ static void processSettingsPack(QueueHandle_t q) {
     if (xQueueReceive(q, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
         SettingsPack pack;
         memcpy(&pack, msg.value.s, sizeof(SettingsPack));
+
+        float oldTank = tank_capacity;
         tank_capacity = pack.tank_capacity;
+
+        // Если ёмкость бака изменилась — проверяем, что остаток не превышает новую ёмкость
+        if (oldTank != tank_capacity && fuel_base > tank_capacity) {
+            fuel_base = tank_capacity;
+            Serial.printf("[Calculator] Tank capacity changed: %.1f -> %.1f L, fuel_base corrected\n",
+                          oldTank, tank_capacity);
+        }
+
+        busMessageFree(&msg);
     }
 }
 
 // =============================================================================
-// processNotFuel: Чтение флага not_fuel
+// processCorrectOdo: Чтение нового значения ODO (float)
 // =============================================================================
-static void processNotFuel(QueueHandle_t q) {
+static void processCorrectOdo(QueueHandle_t q) {
     BusMessage msg;
-    if (xQueueReceive(q, &msg, 0) == pdTRUE && msg.type == TYPE_BOOL) {
-        not_fuel = msg.value.b;
+    if (xQueueReceive(q, &msg, 0) == pdTRUE) {
+        if (msg.type == TYPE_FLOAT) {
+            double newOdo = (double)msg.value.f;
+            Serial.printf("[Calculator] ODO corrected: %.1f km\n", newOdo);
+            odo_base = newOdo;
+        }
+        busMessageFree(&msg);
     }
 }
 
@@ -142,17 +169,30 @@ static void processNotFuel(QueueHandle_t q) {
 static void processCommands(QueueHandle_t q) {
     BusMessage msg;
     while (xQueueReceive(q, &msg, 0) == pdTRUE) {
-        if (msg.type != TYPE_CMD) continue;
+        // Protocol публикует простые команды как int, а параметрические — как CmdPayload
+        Command cmd;
+        if (msg.type == TYPE_INT) {
+            cmd = (Command)msg.value.i;
+        } else if (msg.type == TYPE_CMD) {
+            cmd = msg.cmd.cmd;
+        } else {
+            busMessageFree(&msg);
+            continue;
+        }
 
-        switch (msg.cmd.cmd) {
+        switch (cmd) {
             case CMD_RESET_TRIP_A:
-                trip_a_base = 0.0f;
-                fuel_trip_a_base = 0.0f;
+                // trip_a = trip_a_base + current_distance. Чтобы trip_a = 0:
+                trip_a_base = -current_distance;
+                fuel_trip_a_base = -current_fuel_used;
+                Serial.println("[Calculator] Trip A reset");
                 break;
 
             case CMD_RESET_TRIP_B:
-                trip_b_base = 0.0f;
-                fuel_trip_b_base = 0.0f;
+                // trip_b = trip_b_base + current_distance. Чтобы trip_b = 0:
+                trip_b_base = -current_distance;
+                fuel_trip_b_base = -current_fuel_used;
+                Serial.println("[Calculator] Trip B reset");
                 break;
 
             case CMD_RESET_AVG:
@@ -166,13 +206,10 @@ static void processCommands(QueueHandle_t q) {
                 current_fuel_used = 0.0f;
                 break;
 
-            case CMD_CORRECT_ODO:
-                odo_base = msg.cmd.correct_odo.odo_value;
-                break;
-
             default:
                 break;
         }
+        busMessageFree(&msg);
     }
 }
 
@@ -196,8 +233,8 @@ void calculatorTask(void* parameter) {
     // Подписка на SettingsPack (OVERWRITE, depth=1, retain=true)
     QueueHandle_t settingsQ = db.subscribe(TOPIC_SETTINGS_PACK, tripOpts);
 
-    // Подписка на not_fuel (OVERWRITE, depth=1, retain=true)
-    QueueHandle_t notFuelQ = db.subscribe(TOPIC_NOT_FUEL, tripOpts);
+    // Подписка на коррекцию ODO (OVERWRITE, depth=1)
+    QueueHandle_t correctOdoQ = db.subscribe(TOPIC_CORRECT_ODO, tripOpts);
 
     // Подписка на команды (FIFO_DROP, depth=5)
     SubscriberOpts cmdOpts = {QUEUE_FIFO_DROP, 5, false};
@@ -212,11 +249,11 @@ void calculatorTask(void* parameter) {
         lastHeartbeat = millis();
 
         // Читаем все доступные сообщения из очередей
-        if (engineQ)   processEnginePack(engineQ);
-        if (tripQ)     processTripPack(tripQ);
-        if (settingsQ) processSettingsPack(settingsQ);
-        if (notFuelQ)  processNotFuel(notFuelQ);
-        if (cmdQ)      processCommands(cmdQ);
+        if (engineQ)      processEnginePack(engineQ);
+        if (tripQ)        processTripPack(tripQ);
+        if (settingsQ)    processSettingsPack(settingsQ);
+        if (correctOdoQ)  processCorrectOdo(correctOdoQ);
+        if (cmdQ)         processCommands(cmdQ);
 
         // Расчёт и публикация TripPack каждую секунду
         unsigned long now = millis();
@@ -275,3 +312,4 @@ void calculatorStop() {
 bool calculatorIsRunning() {
     return isRunningFlag && (millis() - lastHeartbeat) < 3000;
 }
+

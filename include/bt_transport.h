@@ -13,5 +13,6 @@
 void btTransportStart(const char* deviceName);
 void btTransportStop();
 bool btIsConnected();
+bool btSend(const char* data);  // Отправить строку напрямую через SPP
 
 #endif // BT_TRANSPORT_H

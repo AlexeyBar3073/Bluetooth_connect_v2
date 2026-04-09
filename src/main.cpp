@@ -53,19 +53,19 @@ void setup() {
     DataBus::getInstance().begin();
     delay(100);
 
-    // 2. Simulator — ОТКЛЮЧЁН (тест BT)
-    Serial.println("[SETUP] 2/9: Simulator... SKIPPED");
-    // simulatorStart();
+    // 2. Simulator
+    Serial.println("[SETUP] 2/9: Simulator...");
+    simulatorStart();
     delay(100);
 
-    // 3. Storage — ОТКЛЮЧЁН (тест BT)
-    Serial.println("[SETUP] 3/9: Storage... SKIPPED");
-    // storageStart();
+    // 3. Storage
+    Serial.println("[SETUP] 3/9: Storage...");
+    storageStart();
     delay(100);
 
-    // 4. Calculator — ОТКЛЮЧЁН (тест BT)
-    Serial.println("[SETUP] 4/9: Calculator... SKIPPED");
-    // calculatorStart();
+    // 4. Calculator
+    Serial.println("[SETUP] 4/9: Calculator...");
+    calculatorStart();
     delay(100);
 
     // 5. Protocol
@@ -88,9 +88,9 @@ void setup() {
     // climateStart();
     delay(100);
 
-    // 9. OLED (отключено для отладки BT)
-    Serial.println("[SETUP] 9/9: OLED... SKIPPED");
-    // oledStart();
+    // 9. OLED
+    Serial.println("[SETUP] 9/9: OLED...");
+    oledStart();
 
     Serial.println("\n=== Setup Complete ===\n");
 }
@@ -106,22 +106,34 @@ void loop() {
     static unsigned long lastFast = 0, lastMed = 0, lastLow = 0;
     unsigned long now = millis();
 
-    // КРИТИЧЕСКИЕ (100 мс) — Simulator отключён для теста BT
+    // КРИТИЧЕСКИЕ (100 мс) — Simulator
     if (now - lastFast >= 100) {
         lastFast = now;
-        // if (!simulatorIsRunning()) {
-        //     Serial.println("[LOOP] CRITICAL: Simulator crashed! Restarting...");
-        //     restartSimulator();
-        // }
+        if (!simulatorIsRunning()) {
+            Serial.println("[LOOP] CRITICAL: Simulator crashed! Restarting...");
+            restartSimulator();
+        }
     }
 
-    // ВЫСОКИЙ (500 мс) — Calculator отключён для теста BT
+    // ВЫСОКИЙ (500 мс) — Calculator
     if (now - lastMed >= 500) {
         lastMed = now;
-        // if (!calculatorIsRunning()) {
-        //     Serial.println("[LOOP] HIGH: Calculator crashed! Restarting...");
-        //     restartCalculator();
-        // }
+        if (!calculatorIsRunning()) {
+            Serial.println("[LOOP] HIGH: Calculator crashed! Restarting...");
+            restartCalculator();
+        }
+        if (!storageIsRunning()) {
+            Serial.println("[LOOP] HIGH: Storage crashed! Restarting...");
+            restartStorage();
+        }
+    }
+    // СРЕДНИЙ (200 мс) — OLED
+    if (now - lastLow >= 200) {
+        lastLow = now;
+        if (!oledIsRunning()) {
+            Serial.println("[LOOP] LOW: OLED crashed! Restarting...");
+            restartDisplay();
+        }
     }
 
     vTaskDelay(50 / portTICK_PERIOD_MS);

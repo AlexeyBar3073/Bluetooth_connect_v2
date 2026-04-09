@@ -8,16 +8,9 @@
 // - Топики разделены на 2 группы: пакетные (данные) и атомарные (управление)
 //
 // Архитектура:
-// В версии 5.0.0 система перешла с ~50 отдельных топиков на 9 агрегированных.
-// Связанные параметры группируются в пакеты (packets.h):
-//   EnginePack  → TOPIC_ENGINE_PACK  (скорость, RPM, напряжение, статус)
-//   TripPack    → TOPIC_TRIP_PACK    (одометр, пробеги, расход, топливо)
-//   ServicePack → TOPIC_SERVICE_PACK (температуры, ошибки, климат)
-//   SettingsPack→ TOPIC_SETTINGS_PACK (бак, форсунки, датчики, протокол)
-//
-// Управляющие топики остаются атомарными:
-//   TOPIC_CMD, TOPIC_MSG_INCOMING, TOPIC_MSG_OUTGOING,
-//   TOPIC_TRANSPORT_STATUS, TOPIC_NOT_FUEL
+// Система построена на агрегированных пакетах. Связанные параметры группируются
+// в структуры (#pragma pack(1)), которые передаются атомарно через шину.
+// Каждый модуль публикует только свои данные в свой топик — нет конфликтов.
 //
 // -----------------------------------------------------------------------------
 // ПРАВИЛА ФАЙЛА:
@@ -25,14 +18,15 @@
 // ✅ Можно:
 //   - Добавлять новые топики в КОНЕЦ enum (перед TOPIC_COUNT)
 //   - Добавлять новые пакетные топики (новый тип пакета → новый топик)
+//   - Расширять описания существующих топиков
 //
 // ❌ Нельзя:
-//   - Менять числовые значения существующих топиков (сломает подписки)
+//   - Менять числовые значения существующих топиков (сломает NVS-совместимость)
 //   - Удалять существующие топики (сломает старые версии модулей)
 //   - Публиковать данные без пакета в пакетный топик
 //   - Публиковать пакет в атомарный топик
 //
-// ВЕРСИЯ: 5.0.0 — MAJOR: Переход на 9 агрегированных топиков
+// ВЕРСИЯ: 5.1.0 — MAJOR: Разделение ServicePack → KlinePack + ClimatePack
 // -----------------------------------------------------------------------------
 
 #ifndef TOPICS_H
@@ -41,11 +35,11 @@
 #include <stdint.h>
 
 // =============================================================================
-// Topic — Перечисление всех топиков шины (9 шт)
+// Topic — Перечисление всех топиков шины (10 шт)
 // =============================================================================
 //
 // Диапазоны:
-//   0x01–0x0F  — Пакетные топики (данные)
+//   0x01–0x0F  — Пакетные топики (данные от модулей)
 //   0xF0–0xFF  — Управляющие топики (команды, транспорт, статус)
 //
 // Политики очередей (настраиваются при подписке):
@@ -54,29 +48,84 @@
 //   TOPIC_MSG_*      → QUEUE_FIFO_DROP, depth=3 (буфер входящих/исходящих)
 //   Остальные        → QUEUE_OVERWRITE, depth=1
 //
+// ВАЖНО: Все числовые значения должны быть СТРОГО меньше TOPIC_COUNT.
+// TOPIC_COUNT автоматически равен следующему значению после последнего элемента.
+//
 enum Topic : uint8_t {
-    // ========================================================================
-    // Пакетные топики (0x01–0x0F)
-    // ========================================================================
-    // Передают агрегированные структуры (packets.h)
-    // publish(topic, &pack, sizeof(pack))
-    // subscribe(topic, packetCallback)
-
-    TOPIC_ENGINE_PACK    = 0x01,  // EnginePack  — FAST-телеметрия (100 мс)
-    TOPIC_TRIP_PACK      = 0x02,  // TripPack    — TRIP-телеметрия (1 сек)
-    TOPIC_SERVICE_PACK   = 0x03,  // ServicePack — SERVICE-телеметрия (1 сек)
-    TOPIC_SETTINGS_PACK  = 0x04,  // SettingsPack — Настройки (retain=true)
 
     // ========================================================================
-    // Управляющие топики (0xF0–0xFF)
+    // ПАКЕТНЫЕ ТОПИКИ (0x01–0x0F)
     // ========================================================================
-    // Передают атомарные данные (cmd, string, bool)
 
-    TOPIC_CMD              = 0xF0,  // CmdPayload — очередь команд (enum Command)
-    TOPIC_MSG_INCOMING     = 0xF1,  // string JSON — входящие от Android
-    TOPIC_MSG_OUTGOING     = 0xF2,  // string JSON — исходящие на Android
-    TOPIC_TRANSPORT_STATUS = 0xF3,  // bool — статус подключения Bluetooth
-    TOPIC_NOT_FUEL         = 0xF4,  // bool — датчик топлива отсутствует (retain=true)
+    TOPIC_ENGINE_PACK    = 0x01,
+    // EnginePack (27 байт) — данные двигателя и ходовой части.
+    // Кто публикует: Simulator / Engine.
+    // Кто подписан: Calculator, Protocol (FAST JSON), OLED.
+    // Периодичность: 100 мс (10 Гц).
+    // Поля: speed, rpm, voltage, engine_running, parking_lights, instant_fuel,
+    //       distance, fuel_used, fuel_level_sensor, not_fuel, gear, selector_pos[4], tcc_lockup.
+
+    TOPIC_TRIP_PACK      = 0x02,
+    // TripPack (41 байт) — одометр, поездки, расход топлива.
+    // Кто публикует: Calculator.
+    // Кто подписан: Storage, Protocol (TRIP JSON), OLED.
+    // Периодичность: 1000 мс (1 Гц).
+    // Поля: odo, trip_a, fuel_trip_a, trip_b, fuel_trip_b,
+    //       trip_cur, fuel_cur, fuel_level, avg_consumption.
+
+    TOPIC_KLINE_PACK     = 0x03,
+    // KlinePack (74 байта) — данные диагностики K-Line (ЭБУ).
+    // Кто публикует: K-Line Task.
+    // Кто подписан: Protocol (SERVICE JSON).
+    // Периодичность: 1000 мс (1 Гц).
+    // Поля: coolant_temp, atf_temp, dtc_count, dtc_codes[64].
+
+    TOPIC_CLIMATE_PACK   = 0x04,
+    // ClimatePack (11 байт) — климат и сервисные датчики.
+    // Кто публикует: Climate Task.
+    // Кто подписан: Protocol (SERVICE JSON).
+    // Периодичность: 1000 мс (1 Гц).
+    // Поля: interior_temp, exterior_temp, tire_pressure, washer_level.
+
+    TOPIC_SETTINGS_PACK  = 0x05,
+    // SettingsPack (19 байт) — настраиваемые параметры автомобиля.
+    // Кто публикует: Storage Task.
+    // Кто подписан: Calculator, Simulator, Protocol (get_cfg), K-Line.
+    // Retain: true.
+
+    // ========================================================================
+    // УПРАВЛЯЮЩИЕ ТОПИКИ (0xF0–0xFF)
+    // ========================================================================
+
+    TOPIC_CMD              = 0xF0,
+    // Команды управления (int — enum Command).
+    // Кто публикует: Protocol Task (парсинг JSON).
+    // Кто подписан: Calculator, K-Line, Simulator.
+    // Политика: QUEUE_FIFO_DROP, depth=5.
+    // Команды: reset_trip_a/b, reset_avg, full_tank, kl_get/clear/reset/pump/detect.
+
+    TOPIC_MSG_INCOMING     = 0xF1,
+    // Входящий JSON от Android (string).
+    // Кто публикует: BT Transport.
+    // Кто подписан: Protocol Task.
+    // Политика: QUEUE_FIFO_DROP, depth=3.
+
+    TOPIC_MSG_OUTGOING     = 0xF2,
+    // Исходящий JSON на Android (string).
+    // Кто публикует: ТОЛЬКО Protocol Task.
+    // Кто подписан: BT Transport.
+    // Политика: QUEUE_FIFO_DROP, depth=5.
+
+    TOPIC_TRANSPORT_STATUS = 0xF3,
+    // Статус подключения Bluetooth (bool).
+    // Кто публикует: BT Transport.
+    // Кто подписан: OLED, Protocol.
+
+    TOPIC_CORRECT_ODO      = 0xF5,
+    // Корректировка одометра (float — новое значение ODO в км).
+    // Кто публикует: Protocol Task (парсинг JSON correct_odo).
+    // Кто подписан: Calculator Task (обновление odo_base).
+    // Политика: QUEUE_OVERWRITE, depth=1.
 
     TOPIC_COUNT  // Общее количество топиков (для массивов, циклов)
 };

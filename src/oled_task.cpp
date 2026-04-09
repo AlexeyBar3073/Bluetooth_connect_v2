@@ -32,6 +32,7 @@ static U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 static float displaySpeed = 0, displayRpm = 0, displayFuel = 0;
 static float displayVoltage = 12.7f, displayConsumption = 0;
 static bool  displayEngine = false, displayBtConnected = false;
+static bool  displayParkingLights = false;
 static float tankCapacity = 60.0f;
 
 // =============================================================================
@@ -53,27 +54,40 @@ static void oledUpdate() {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tr);
 
+    // Строка 1: статус двигателя
     u8g2.setCursor(0, 10);
-    u8g2.print(displayBtConnected ? "BT:ON " : "BT:OFF ");
     u8g2.print(displayEngine ? "ENG:RUN" : "ENG:OFF");
 
-    u8g2.setCursor(0, 26);
+    // Строка 2: скорость
+    u8g2.setCursor(0, 20);
     u8g2.print("SPD:");
     u8g2.print(displaySpeed, 1);
     u8g2.print(" km/h");
 
-    u8g2.setCursor(0, 42);
+    // Строка 3: обороты
+    u8g2.setCursor(0, 30);
     u8g2.print("RPM:");
     u8g2.print((int)displayRpm);
 
-    u8g2.setCursor(0, 58);
+    // Строка 4: топливо + прогресс-бар
+    u8g2.setCursor(0, 40);
     u8g2.print("FUEL:");
     u8g2.print(displayFuel, 1);
     u8g2.print("L");
+    drawProgressBar(75, 34, 50, 5, (tankCapacity > 0) ? (displayFuel / tankCapacity) : 0);
 
-    drawProgressBar(75, 50, 50, 5, (tankCapacity > 0) ? (displayFuel / tankCapacity) : 0);
+    // Строка 5: средний расход
+    u8g2.setCursor(0, 50);
+    u8g2.print("AVG:");
+    u8g2.print(displayConsumption, 1);
+    u8g2.print(" L/100");
 
-    drawBtIcon(112, 0, displayBtConnected);
+    // Иконки в правом верхнем углу: габариты + BT
+    if (displayParkingLights) {
+        u8g2.drawBitmap(96, 0, 2, 16, ic_parking_lights);
+    }
+    drawBtIcon(displayParkingLights ? 112 : 96, 0, displayBtConnected);
+
     u8g2.sendBuffer();
 }
 
@@ -127,6 +141,8 @@ void oledTask(void* parameter) {
             displayRpm = p.rpm;
             displayVoltage = p.voltage;
             displayEngine = p.engine_running;
+            displayParkingLights = p.parking_lights;
+            busMessageFree(&msg);
         }
 
         // Чтение TripPack
@@ -134,11 +150,13 @@ void oledTask(void* parameter) {
             TripPack p; memcpy(&p, msg.value.s, sizeof(TripPack));
             displayFuel = p.fuel_level;
             displayConsumption = p.avg_consumption;
+            busMessageFree(&msg);
         }
 
         // Чтение BT статуса
-        if (btQ && xQueueReceive(btQ, &msg, 0) == pdTRUE && msg.type == TYPE_BOOL) {
-            displayBtConnected = msg.value.b;
+        if (btQ && xQueueReceive(btQ, &msg, 0) == pdTRUE) {
+            if (msg.type == TYPE_BOOL) displayBtConnected = msg.value.b;
+            busMessageFree(&msg);
         }
 
         // Обновление дисплея каждые 200 мс
@@ -154,7 +172,7 @@ void oledTask(void* parameter) {
 
 void oledStart() {
     if (!oledTaskHandle) {
-        xTaskCreatePinnedToCore(oledTask, "OLED", 8192, NULL, 2, &oledTaskHandle, 0);
+        xTaskCreatePinnedToCore(oledTask, "OLED", TASK_STACK_SIZE, NULL, 2, &oledTaskHandle, 0);
         Serial.println("[OLED] Started (8K stack, P2)");
     }
 }
@@ -168,3 +186,5 @@ void oledStop() {
 }
 
 bool oledIsRunning() { return isRunning; }
+
+

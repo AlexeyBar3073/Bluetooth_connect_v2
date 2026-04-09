@@ -4,8 +4,11 @@
 //
 // Назначение:
 // - Подписан на TOPIC_CMD (FIFO_DROP, depth=5) → kl_* команды
-// - Публикует ServicePack в TOPIC_SERVICE_PACK каждые 1000 мс
+// - Публикует KlinePack в TOPIC_KLINE_PACK каждые 1000 мс
 // - Режим симуляции: тестовые данные (температуры, DTC)
+//
+// ВАЖНО: K-Line НЕ формирует JSON! Он публикует KlinePack в свой топик.
+// Protocol Task подписан, собирает SERVICE JSON.
 //
 // -----------------------------------------------------------------------------
 // ПРАВИЛА ФАЙЛА:
@@ -17,9 +20,11 @@
 //
 // ❌ нельзя:
 //   - Блокировать >500 мс
-//   - Публиковать ServicePack чаще 1000 мс
+//   - Публиковать KlinePack чаще 1000 мс
+//   - Формировать JSON или публиковать в TOPIC_MSG_OUTGOING
+//   - Оперировать msg_id / ack_id
 //
-// ВЕРСИЯ: 5.0.0 — MAJOR: Queue-архитектура, ServicePack
+// ВЕРСИЯ: 5.1.0 — MAJOR: Публикация KlinePack (не ServicePack)
 // -----------------------------------------------------------------------------
 
 #include "kline_task.h"
@@ -27,6 +32,7 @@
 #include "topics.h"
 #include "packets.h"
 #include "commands.h"
+#include "app_config.h"
 
 // =============================================================================
 // Глобальные переменные
@@ -62,40 +68,46 @@ static void updateTestData() {
 static void processCommands(QueueHandle_t q, DataBus& db) {
     BusMessage msg;
     while (xQueueReceive(q, &msg, 0) == pdTRUE) {
-        if (msg.type != TYPE_CMD) continue;
+        if (msg.type != TYPE_INT && msg.type != TYPE_CMD) {
+            busMessageFree(&msg);
+            continue;
+        }
 
-        switch (msg.cmd.cmd) {
-            case CMD_KL_GET_DTC: {
-                char resp[128];
-                snprintf(resp, sizeof(resp), "{\"ack_id\":%d,\"dtc\":\"%s\",\"count\":%d}\n",
-                         msg.cmd.msg_id, testDtcCodes, testDtcCount);
-                db.publish(TOPIC_MSG_OUTGOING, resp);
+        Command cmd;
+        if (msg.type == TYPE_INT) {
+            cmd = (Command)msg.value.i;
+        } else {
+            cmd = msg.cmd.cmd;
+        }
+        busMessageFree(&msg);
+
+        switch (cmd) {
+            case CMD_KL_GET_DTC:
+                // K-Line НЕ отправляет JSON! Обновляем данные, Protocol сам соберёт ответ
+                Serial.println("[KLine] DTC request received (will update KlinePack)");
                 break;
-            }
-            case CMD_KL_CLEAR_DTC: {
+
+            case CMD_KL_CLEAR_DTC:
                 testDtcCount = 0;
-                strcpy(testDtcCodes, "");
-                char ack[32];
-                snprintf(ack, sizeof(ack), "{\"ack_id\":%d}\n", msg.cmd.msg_id);
-                db.publish(TOPIC_MSG_OUTGOING, ack);
+                memset(testDtcCodes, 0, sizeof(testDtcCodes));
+                Serial.println("[KLine] DTC cleared");
                 break;
-            }
+
             case CMD_KL_RESET_ADAPT:
-            case CMD_KL_PUMP_ATF: {
-                char ack[32];
-                snprintf(ack, sizeof(ack), "{\"ack_id\":%d}\n", msg.cmd.msg_id);
-                db.publish(TOPIC_MSG_OUTGOING, ack);
+                Serial.println("[KLine] TCM adaptation reset requested");
                 break;
-            }
-            case CMD_KL_DETECT_PROTO: {
-                // Симуляция автоопределения
+
+            case CMD_KL_PUMP_ATF:
+                Serial.println("[KLine] ATF pump requested");
+                break;
+
+            case CMD_KL_DETECT_PROTO:
                 currentProtocol = 1;
-                char ack[32];
-                snprintf(ack, sizeof(ack), "{\"ack_id\":%d}\n", msg.cmd.msg_id);
-                db.publish(TOPIC_MSG_OUTGOING, ack);
+                Serial.println("[KLine] Protocol detection requested");
                 break;
-            }
-            default: break;
+
+            default:
+                break;
         }
     }
 }
@@ -123,22 +135,21 @@ void klineTask(void* parameter) {
         // Обработка команд
         if (cmdQ) processCommands(cmdQ, db);
 
-        // Публикация ServicePack каждые 1000 мс
+        // Публикация KlinePack каждые 1000 мс
         unsigned long now = millis();
         if (now - lastPublish >= 1000) {
             lastPublish = now;
             updateTestData();
 
-            ServicePack pack;
+            KlinePack pack;
             memset(&pack, 0, sizeof(pack));
             pack.version      = 1;
             pack.coolant_temp = testCoolant;
             pack.atf_temp     = testAtf;
             pack.dtc_count    = (uint8_t)testDtcCount;
             strlcpy(pack.dtc_codes, testDtcCodes, sizeof(pack.dtc_codes));
-            // interior/exterior temp, tire, wash — от Climate Task
 
-            db.publishPacket(TOPIC_SERVICE_PACK, &pack, sizeof(pack));
+            db.publishPacket(TOPIC_KLINE_PACK, &pack, sizeof(pack));
         }
 
         vTaskDelay(50 / portTICK_PERIOD_MS);
@@ -151,7 +162,7 @@ void klineTask(void* parameter) {
 
 void klineStart() {
     if (!taskHandle) {
-        xTaskCreatePinnedToCore(klineTask, "KLine", 8192, NULL, 2, &taskHandle, 0);
+        xTaskCreatePinnedToCore(klineTask, "KLine", TASK_STACK_SIZE, NULL, 2, &taskHandle, 0);
         Serial.println("[KLine] Started (8K stack, P2)");
     }
 }
@@ -166,9 +177,12 @@ void klineStop() {
 }
 
 bool klineIsRunning() { return isRunningFlag && (millis() - lastHeartbeat) < 3000; }
+bool klineIsConnected() { return !isRealMode; }
 
-// Legacy-функции для совместимости с Protocol Task
+// Legacy-функции для обратной совместимости
 void klineRequestDTC() {}
 void klineClearDTC() {}
 void klineResetTCMAdaptation() {}
 void klineStartABSBleed() {}
+
+
