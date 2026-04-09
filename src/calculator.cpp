@@ -55,6 +55,7 @@ static float   fuel_base         = 60.0f;
 
 // --- Инициализация от Storage ---
 static bool    storageInit       = false;
+static bool    fuelLoaded        = false;
 
 // --- Накопленные за поездку ---
 static float   current_distance  = 0.0f;
@@ -68,7 +69,7 @@ static float   avg_total         = 0.0f;   // Накопленный за всё
 static float   fuel_level_sensor = 0.0f;  // Рассчитан EngineModule/Simulator
 
 // --- Статусы ---
-static bool    not_fuel          = false;  // true = датчика топлива нет (из EnginePack.not_fuel)
+static bool    not_fuel          = false;  // Датчик топлива есть (Simulator считает)
 static bool    engineRunning     = false;
 
 // --- Настройки ---
@@ -120,7 +121,11 @@ static void processTripPack(QueueHandle_t q) {
                 avg_total = pack.avg_total;
             }
         }
-        if (not_fuel && !engineRunning) fuel_base = pack.fuel_level;
+        // fuel_level из первого TripPack (из NVS) — всегда берём
+        if (!fuelLoaded && pack.fuel_level > 0.01f) {
+            fuelLoaded = true;
+            fuel_base = pack.fuel_level;
+        }
     }
 }
 

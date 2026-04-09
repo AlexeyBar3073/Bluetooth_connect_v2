@@ -64,6 +64,7 @@ static float  fuelLevelSensor  = 60.0f;   // Текущий остаток (ра
 
 // --- Инициализация от Storage ---
 static bool   storageInit      = false;
+static bool   fuelLoaded       = false;
 
 // --- Настройки (из SettingsPack) ---
 static float  tankCapacity     = 60.0f;
@@ -332,14 +333,16 @@ void simulatorTask(void* parameter) {
         // ====== 6. Обработка команд ======
         if (cmdQueue) processCommands(cmdQueue);
 
-        // ====== 7. Чтение TripPack (fuel_base) ======
+        // ====== 7. Чтение TripPack (fuel_base из NVS) ======
         if (tripQ) {
             TripPack p;
             if (xQueueReceive(tripQ, &p, 0) == pdTRUE) {
-                if (p.fuel_level > 0 && fuelBase < 0.1f) {
+                // Берём fuel_level из первого TripPack (из NVS)
+                if (!fuelLoaded && p.fuel_level > 0.01f) {
+                    fuelLoaded = true;
                     fuelBase = p.fuel_level;
                     fuelLevelSensor = fuelBase;
-                    Serial.printf("[Simulator] fuel_base from Storage: %.1f L\n", fuelBase);
+                    Serial.printf("[Simulator] fuel_base from NVS: %.1f L\n", fuelBase);
                 }
             }
         }
