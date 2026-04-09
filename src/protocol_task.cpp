@@ -26,7 +26,7 @@
 // -----------------------------------------------------------------------------
 
 #include "protocol_task.h"
-#include "data_bus.h"
+#include "data_router.h"
 #include "topics.h"
 #include "packets.h"
 #include "commands.h"
@@ -65,11 +65,10 @@ static struct {
     // TripPack
     double  odo = 0;
     float   trip_a = 0, fuel_a = 0, trip_b = 0, fuel_b = 0;
-    float   trip_cur = 0, fuel_cur = 0, fuel = 0, avg = 0;
+    float   trip_cur = 0, fuel_cur = 0, fuel = 0, avg = 0, avg_total = 0;
 
     // KlinePack
     float   t_cool = 0, t_atf = 0;
-    uint8_t dtc_cnt = 0;
     char    dtc[64] = "";
 
     // ClimatePack
@@ -89,10 +88,8 @@ static char outBuffer[512];
 // processEnginePack
 // =============================================================================
 static void processEnginePack(QueueHandle_t q) {
-    BusMessage msg;
-    if (xQueueReceive(q, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
-        EnginePack p;
-        memcpy(&p, msg.value.s, sizeof(EnginePack));
+    EnginePack p;
+    if (xQueueReceive(q, &p, 0) == pdTRUE) {
         tel.speed = p.speed;
         tel.rpm = p.rpm;
         tel.voltage = p.voltage;
@@ -101,8 +98,13 @@ static void processEnginePack(QueueHandle_t q) {
         tel.inst_fuel = p.instant_fuel;
         tel.gear = p.gear;
         tel.tcc = p.tcc_lockup;
-        strlcpy(tel.sel, p.selector_pos, sizeof(tel.sel));
-        busMessageFree(&msg);
+
+        // Формируем sel: R/N/P/2/L как есть, D + gear
+        if (p.gear > 0 && strcmp(p.selector_pos, "D") == 0) {
+            snprintf(tel.sel, sizeof(tel.sel), "D%d", p.gear);
+        } else {
+            strlcpy(tel.sel, p.selector_pos, sizeof(tel.sel));
+        }
     }
 }
 
@@ -110,10 +112,8 @@ static void processEnginePack(QueueHandle_t q) {
 // processTripPack
 // =============================================================================
 static void processTripPack(QueueHandle_t q) {
-    BusMessage msg;
-    if (xQueueReceive(q, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
-        TripPack p;
-        memcpy(&p, msg.value.s, sizeof(TripPack));
+    TripPack p;
+    if (xQueueReceive(q, &p, 0) == pdTRUE) {
         tel.odo = p.odo;
         tel.trip_a = p.trip_a;
         tel.fuel_a = p.fuel_trip_a;
@@ -123,7 +123,7 @@ static void processTripPack(QueueHandle_t q) {
         tel.fuel_cur = p.fuel_cur;
         tel.fuel = p.fuel_level;
         tel.avg = p.avg_consumption;
-        busMessageFree(&msg);
+        tel.avg_total = p.avg_total;
     }
 }
 
@@ -131,15 +131,11 @@ static void processTripPack(QueueHandle_t q) {
 // processKlinePack
 // =============================================================================
 static void processKlinePack(QueueHandle_t q) {
-    BusMessage msg;
-    if (xQueueReceive(q, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
-        KlinePack p;
-        memcpy(&p, msg.value.s, sizeof(KlinePack));
+    KlinePack p;
+    if (xQueueReceive(q, &p, 0) == pdTRUE) {
         tel.t_cool = p.coolant_temp;
         tel.t_atf = p.atf_temp;
-        tel.dtc_cnt = p.dtc_count;
         strlcpy(tel.dtc, p.dtc_codes, sizeof(tel.dtc));
-        busMessageFree(&msg);
     }
 }
 
@@ -147,15 +143,12 @@ static void processKlinePack(QueueHandle_t q) {
 // processClimatePack
 // =============================================================================
 static void processClimatePack(QueueHandle_t q) {
-    BusMessage msg;
-    if (xQueueReceive(q, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
-        ClimatePack p;
-        memcpy(&p, msg.value.s, sizeof(ClimatePack));
+    ClimatePack p;
+    if (xQueueReceive(q, &p, 0) == pdTRUE) {
         tel.t_int = p.interior_temp;
         tel.t_ext = p.exterior_temp;
         tel.tire = p.tire_pressure;
         tel.wash = p.washer_level;
-        busMessageFree(&msg);
     }
 }
 
@@ -163,16 +156,13 @@ static void processClimatePack(QueueHandle_t q) {
 // processSettingsPack
 // =============================================================================
 static void processSettingsPack(QueueHandle_t q) {
-    BusMessage msg;
-    if (xQueueReceive(q, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
-        SettingsPack p;
-        memcpy(&p, msg.value.s, sizeof(SettingsPack));
+    SettingsPack p;
+    if (xQueueReceive(q, &p, 0) == pdTRUE) {
         cfg.tank = p.tank_capacity;
         cfg.inj_perf = p.injector_flow;
         cfg.inj_cnt = p.injector_count;
         cfg.spd_sig = p.pulses_per_meter;
         cfg.kl_proto = p.kline_protocol;
-        busMessageFree(&msg);
     }
 }
 
@@ -183,7 +173,7 @@ static void buildFastJson(JsonDocument& doc);
 static void addTripFields(JsonDocument& doc);
 static void addServiceFields(JsonDocument& doc);
 static void injectAckId(JsonDocument& doc);
-static void publishOutgoing(DataBus& db, JsonDocument& doc);
+static void publishOutgoing(JsonDocument& doc);
 
 // =============================================================================
 // injectAckId: Подмешивает ack_id если есть квитанция, обнуляет lastMsgId
@@ -196,12 +186,10 @@ static void injectAckId(JsonDocument& doc) {
 }
 
 // =============================================================================
-// publishOutgoing: Сериализует JSON и отправляет напрямую через BT
+// publishOutgoing: Сериализует JSON и отправляет через DataRouter
 // =============================================================================
-// JSON может быть длиннее PAYLOAD_MAX (256), поэтому отправляем напрямую
-// через btSend(), минуя DataBus.
 
-static void publishOutgoing(DataBus& db, JsonDocument& doc) {
+static void publishOutgoing(JsonDocument& doc) {
     serializeJson(doc, outBuffer, sizeof(outBuffer));
     strlcat(outBuffer, "\n", sizeof(outBuffer));
     outBuffer[sizeof(outBuffer) - 1] = '\0';
@@ -210,8 +198,8 @@ static void publishOutgoing(DataBus& db, JsonDocument& doc) {
     btSend(outBuffer);
 
     // Короткие JSON дублируем в шину (для отладки)
-    if (strlen(outBuffer) < PAYLOAD_MAX) {
-        db.publish(TOPIC_MSG_OUTGOING, outBuffer);
+    if (strlen(outBuffer) < 256) {
+        DataRouter::getInstance().publishString(TOPIC_MSG_OUTGOING, outBuffer);
     }
 }
 
@@ -223,30 +211,23 @@ static void publishOutgoing(DataBus& db, JsonDocument& doc) {
 // Извлекает msg_id, сохраняет локально, обрабатывает команду,
 // отправляет ACK (квитанция подмешается к ближайшему исходящему).
 //
-static void processIncoming(QueueHandle_t q, DataBus& db) {
-    BusMessage msg;
-    while (xQueueReceive(q, &msg, 0) == pdTRUE) {
-        if (msg.type != TYPE_STRING) {
-            busMessageFree(&msg);
-            continue;
-        }
-
-        Serial.printf("[Protocol] RX JSON: %s", msg.value.s);
+static void processIncoming(QueueHandle_t q) {
+    char rxBuffer[256];
+    while (xQueueReceive(q, rxBuffer, 0) == pdTRUE) {
+        Serial.printf("[Protocol] RX JSON: %s\n", rxBuffer);
 
         JsonDocument doc;
-        if (deserializeJson(doc, msg.value.s)) {
+        if (deserializeJson(doc, rxBuffer)) {
             // Невалидный JSON
             JsonDocument err;
             err["error"] = "Invalid JSON";
-            publishOutgoing(db, err);
-            busMessageFree(&msg);
+            publishOutgoing(err);
             continue;
         }
 
         const char* cmd = doc["command"];
         if (!cmd) cmd = doc["cmd"];
         if (!cmd) {
-            busMessageFree(&msg);
             continue;
         }
 
@@ -266,7 +247,7 @@ static void processIncoming(QueueHandle_t q, DataBus& db) {
             c["tank"] = cfg.tank; c["inj_perf"] = cfg.inj_perf;
             c["inj_cnt"] = cfg.inj_cnt; c["spd_sig"] = cfg.spd_sig;
             c["kl_proto"] = cfg.kl_proto; c["fw"] = FW_VERSION_STR;
-            publishOutgoing(db, resp);
+            publishOutgoing(resp);
             continue;
         }
 
@@ -290,12 +271,12 @@ static void processIncoming(QueueHandle_t q, DataBus& db) {
             if (data["spd_sig"]) pack.pulses_per_meter = data["spd_sig"].as<float>();
             if (data["kl_proto"]) pack.kline_protocol = data["kl_proto"].as<int>();
 
-            db.publishPacket(TOPIC_SETTINGS_PACK, &pack, sizeof(pack));
+            DataRouter::getInstance().publishPacket(TOPIC_SETTINGS_PACK, &pack, sizeof(pack));
 
             // ACK (квитанция подмешается)
             JsonDocument resp;
             injectAckId(resp);
-            publishOutgoing(db, resp);
+            publishOutgoing(resp);
             continue;
         }
 
@@ -304,7 +285,7 @@ static void processIncoming(QueueHandle_t q, DataBus& db) {
             // ACK сразу (квитанция подмешается)
             JsonDocument resp;
             injectAckId(resp);
-            publishOutgoing(db, resp);
+            publishOutgoing(resp);
 
             isStreamingActive = true;
             Serial.println("[Protocol] Streaming STARTED");
@@ -313,7 +294,7 @@ static void processIncoming(QueueHandle_t q, DataBus& db) {
         else if (strcmp(cmd, "stop_telemetry") == 0) {
             JsonDocument resp;
             injectAckId(resp);
-            publishOutgoing(db, resp);
+            publishOutgoing(resp);
 
             isStreamingActive = false;
             Serial.println("[Protocol] Streaming STOPPED");
@@ -335,13 +316,13 @@ static void processIncoming(QueueHandle_t q, DataBus& db) {
         else if (strcmp(cmd, "correct_odo") == 0) {
             // Параметрическая команда — публикуем в отдельный топик
             // Android шлёт: {"data": 123456} или {"data":{"value":123456}}
-            float odo_value = 0.0f;
+            double odo_value = 0.0;
             if (doc["data"].is<double>()) {
                 odo_value = doc["data"].as<double>();
             } else if (doc["data"]["value"].is<double>()) {
                 odo_value = doc["data"]["value"].as<double>();
             }
-            db.publish(TOPIC_CORRECT_ODO, odo_value);
+            DataRouter::getInstance().publish(TOPIC_CORRECT_ODO, odo_value);
             Serial.printf("[Protocol] correct_odo: %.1f km\n", odo_value);
             // ACK подмешается в ближайшее исходящее
             continue;
@@ -355,19 +336,17 @@ static void processIncoming(QueueHandle_t q, DataBus& db) {
             JsonDocument resp;
             injectAckId(resp);
             resp["error"] = "Unknown command";
-            publishOutgoing(db, resp);
+            publishOutgoing(resp);
             continue;
         }
 
-        // Публикуем enum Command в шину (без msg_id — только Protocol знает про квитанции)
-        db.publish(TOPIC_CMD, (int)enumCmd);
+        // Публикуем enum Command в шину (1 байт — без msg_id, msg_id знает только Protocol)
+        DataRouter::getInstance().publish(TOPIC_CMD, enumCmd);
 
         // ACK (квитанция подмешается)
         JsonDocument resp;
         injectAckId(resp);
-        publishOutgoing(db, resp);
-
-        busMessageFree(&msg);
+        publishOutgoing(resp);
     }
 }
 
@@ -378,9 +357,8 @@ static void processIncoming(QueueHandle_t q, DataBus& db) {
 static void buildFastJson(JsonDocument& doc) {
     JsonObject t = doc["tel"].to<JsonObject>();
     t["spd"] = (int)tel.speed; t["rpm"] = (int)tel.rpm;
-    t["vlt"] = roundf(tel.voltage * 10) / 10; t["eng"] = tel.eng;
-    t["hl"] = tel.hl; t["gear"] = tel.gear;
-    t["sel"] = tel.sel; t["tcc"] = tel.tcc;
+    t["vlt"] = roundf(tel.voltage * 10) / 10; t["eng"] = (int)tel.eng;
+    t["hl"] = (int)tel.hl; t["sel"] = tel.sel; t["tcc"] = (int)tel.tcc;
 
     // Если данных от Calculator еще нет (odo=0), покажем размер бака
     float fuelToSend = (tel.odo == 0) ? cfg.tank : roundf(tel.fuel * 10) / 10;
@@ -403,7 +381,9 @@ static void addTripFields(JsonDocument& doc) {
     t["fuel_cur"] = roundf(tel.fuel_cur * 10) / 10;
     t["fuel"] = fuelToSend;
     t["inst"] = roundf(tel.inst_fuel * 10) / 10;
-    t["avg"] = roundf(tel.avg * 10) / 10;
+    t["avg_cur"] = roundf(tel.avg * 10) / 10;
+    float avgToDisplay = (tel.avg_total > 0.0f) ? tel.avg_total : tel.avg;
+    t["avg"] = roundf(avgToDisplay * 10) / 10;
 }
 
 // =============================================================================
@@ -414,12 +394,11 @@ static void addServiceFields(JsonDocument& doc) {
     JsonObject t = doc["tel"];
     t["t_cool"] = roundf(tel.t_cool * 10) / 10;
     t["t_atf"] = roundf(tel.t_atf * 10) / 10;
-    t["dtc_cnt"] = (int)tel.dtc_cnt;
     t["dtc"] = tel.dtc;
     t["t_int"] = roundf(tel.t_int * 10) / 10;
     t["t_ext"] = roundf(tel.t_ext * 10) / 10;
-    t["tire"] = tel.tire;
-    t["wash"] = tel.wash;
+    t["tire"] = (int)tel.tire;
+    t["wash"] = (int)tel.wash;
 }
 
 // =============================================================================
@@ -429,21 +408,26 @@ static void addServiceFields(JsonDocument& doc) {
 void protocolTask(void* parameter) {
     (void)parameter;
     isRunningFlag = true;
-    DataBus& db = DataBus::getInstance();
+    DataRouter& dr = DataRouter::getInstance();
 
-    // Подписки на пакеты (QUEUE_OVERWRITE, depth=1)
-    SubscriberOpts pktOpts = {QUEUE_OVERWRITE, 1, false};
-    QueueHandle_t engineQ   = db.subscribe(TOPIC_ENGINE_PACK, pktOpts);
-    QueueHandle_t tripQ     = db.subscribe(TOPIC_TRIP_PACK, pktOpts);
-    QueueHandle_t klineQ    = db.subscribe(TOPIC_KLINE_PACK, pktOpts);
-    QueueHandle_t climateQ  = db.subscribe(TOPIC_CLIMATE_PACK, pktOpts);
-    QueueHandle_t settingsQ = db.subscribe(TOPIC_SETTINGS_PACK, pktOpts);
+    // Создаём очереди для пакетов (модуль создаёт, DataRouter регистрирует)
+    QueueHandle_t engineQ   = xQueueCreate(1, sizeof(EnginePack));
+    QueueHandle_t tripQ     = xQueueCreate(1, sizeof(TripPack));
+    QueueHandle_t klineQ    = xQueueCreate(1, sizeof(KlinePack));
+    QueueHandle_t climateQ  = xQueueCreate(1, sizeof(ClimatePack));
+    QueueHandle_t settingsQ = xQueueCreate(1, sizeof(SettingsPack));
 
-    // Подписка на входящие (FIFO_DROP, depth=3)
-    SubscriberOpts inOpts = {QUEUE_FIFO_DROP, 3, false};
-    QueueHandle_t incomingQ = db.subscribe(TOPIC_MSG_INCOMING, inOpts);
+    dr.subscribe(TOPIC_ENGINE_PACK,   engineQ,   QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_TRIP_PACK,     tripQ,     QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_KLINE_PACK,    klineQ,    QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_CLIMATE_PACK,  climateQ,  QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE);
 
-    Serial.println("[Protocol] Task started (Fractional: FAST 100ms, TRIP 500ms, SERVICE 1000ms)");
+    // Подписка на входящие (FIFO_DROP)
+    QueueHandle_t incomingQ = xQueueCreate(3, 256);
+    dr.subscribe(TOPIC_MSG_INCOMING, incomingQ, QueuePolicy::FIFO_DROP);
+
+    Serial.println("[Protocol] Task started (DataRouter, Fractional: FAST 100ms, TRIP 500ms, SERVICE 1000ms)");
 
     unsigned long lastSend = 0;
     int counter = 0;
@@ -459,7 +443,7 @@ void protocolTask(void* parameter) {
         if (settingsQ) processSettingsPack(settingsQ);
 
         // Обработка входящих команд
-        if (incomingQ) processIncoming(incomingQ, db);
+        if (incomingQ) processIncoming(incomingQ);
 
         // Фракционная отправка телеметрии (ТЗ п.5.1–5.6)
         if (!isStreamingActive) { vTaskDelay(10 / portTICK_PERIOD_MS); continue; }
@@ -480,7 +464,7 @@ void protocolTask(void* parameter) {
             // Подмешиваем ack_id если есть квитанция
             injectAckId(doc);
 
-            publishOutgoing(db, doc);
+            publishOutgoing(doc);
 
             // Отладка: первые 3 сообщения и каждое 100-е — выводим полный JSON
             static int logCount = 0;

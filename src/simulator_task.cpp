@@ -33,7 +33,7 @@
 // -----------------------------------------------------------------------------
 
 #include "simulator_task.h"
-#include "data_bus.h"
+#include "data_router.h"
 #include "topics.h"
 #include "packets.h"
 #include "commands.h"
@@ -61,6 +61,9 @@ static float  currentFuelUsed  = 0.0f;
 // --- Топливо ---
 static float  fuelBase         = 60.0f;   // Начальный остаток (от Storage/TripPack)
 static float  fuelLevelSensor  = 60.0f;   // Текущий остаток (рассчитан, округлён до 0.1)
+
+// --- Инициализация от Storage ---
+static bool   storageInit      = false;
 
 // --- Настройки (из SettingsPack) ---
 static float  tankCapacity     = 60.0f;
@@ -125,26 +128,14 @@ static float getInstantFuel() {
 // Обрабатывает CMD_FULL_TANK: fuel_base = tank_capacity.
 //
 static void processCommands(QueueHandle_t cmdQueue) {
-    BusMessage msg;
-    while (xQueueReceive(cmdQueue, &msg, 0) == pdTRUE) {
-        // Protocol публикует простые команды как int, а параметрические — как CmdPayload
-        Command cmd;
-        if (msg.type == TYPE_INT) {
-            cmd = (Command)msg.value.i;
-        } else if (msg.type == TYPE_CMD) {
-            cmd = msg.cmd.cmd;
-        } else {
-            busMessageFree(&msg);
-            continue;
-        }
-
+    uint8_t cmd;
+    while (xQueueReceive(cmdQueue, &cmd, 0) == pdTRUE) {
         if (cmd == CMD_FULL_TANK) {
             fuelBase = tankCapacity;
             currentFuelUsed = 0.0f;
             fuelLevelSensor = roundf(fuelBase * 10.0f) / 10.0f;
             Serial.printf("[Simulator] Full tank: fuelBase = %.1f L\n", fuelBase);
         }
-        busMessageFree(&msg);
     }
 }
 
@@ -163,7 +154,7 @@ static void processCommands(QueueHandle_t cmdQueue) {
 void simulatorTask(void* parameter) {
     (void)parameter;
     isRunning = true;
-    DataBus& db = DataBus::getInstance();
+    DataRouter& dr = DataRouter::getInstance();
 
     // Инициализация GPIO
     pinMode(BUTTON_ENGINE_PIN, INPUT_PULLUP);
@@ -175,8 +166,7 @@ void simulatorTask(void* parameter) {
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
 
-    // Калибровка педали газа: 20 замеров, проверка стабильности
-    // Если разброс > 200 — пин плавает (нет подтяжки), считаем отключённым
+    // Калибровка педали газа
     {
         int sum = 0, minV = 4095, maxV = 0;
         for (int i = 0; i < 20; i++) {
@@ -192,28 +182,23 @@ void simulatorTask(void* parameter) {
         Serial.printf("[Simulator] Pedal ADC: avg=%d spread=%d %s\n",
                       avg, spread, pedalConnected ? "CONNECTED" : "DISCONNECTED (floating)");
         if (!pedalConnected) {
-            filteredRaw = 0.0f;  // Принудительный 0 throttle
+            filteredRaw = 0.0f;
         } else {
             filteredRaw = (float)avg;
         }
     }
 
-    // Подписка на команды (FIFO_DROP, depth=5)
-    SubscriberOpts cmdOpts = {QUEUE_FIFO_DROP, 5, false};
-    QueueHandle_t cmdQueue = db.subscribe(TOPIC_CMD, cmdOpts);
+    // Создаём очереди и регистрируем в DataRouter
+    QueueHandle_t cmdQueue = xQueueCreate(5, sizeof(uint8_t));
+    dr.subscribe(TOPIC_CMD, cmdQueue, QueuePolicy::FIFO_DROP);
 
-    // Подписка на TripPack (OVERWRITE, depth=1, retain=true) — для fuel_base
-    SubscriberOpts tripOpts = {QUEUE_OVERWRITE, 1, true};
-    QueueHandle_t tripQ = db.subscribe(TOPIC_TRIP_PACK, tripOpts);
+    QueueHandle_t tripQ = xQueueCreate(1, sizeof(TripPack));
+    dr.subscribe(TOPIC_TRIP_PACK, tripQ, QueuePolicy::OVERWRITE);
 
-    // Подписка на настройки (OVERWRITE, depth=1, retain=true)
-    SubscriberOpts cfgOpts = {QUEUE_OVERWRITE, 1, true};
-    QueueHandle_t cfgQueue = db.subscribe(TOPIC_SETTINGS_PACK, cfgOpts);
+    QueueHandle_t cfgQ = xQueueCreate(1, sizeof(SettingsPack));
+    dr.subscribe(TOPIC_SETTINGS_PACK, cfgQ, QueuePolicy::OVERWRITE, true);  // retain
 
-    // Публикация not_fuel = true (виртуальный расчёт топлива)
-    // Это поле теперь в EnginePack, а не в отдельном топике.
-
-    Serial.println("[Simulator] Task started (Queue-based)");
+    Serial.println("[Simulator] Task started (DataRouter-based)");
 
     // Локальные переменные для обработки кнопок
     unsigned long enginePressStartTime = 0;
@@ -316,8 +301,8 @@ void simulatorTask(void* parameter) {
         }
 
         // ====== 5. Публикация EnginePack (каждые 100 мс) ======
-        if (now - lastPublishTime >= 100) {
-            lastPublishTime = now;
+        if (now - lastEnginePackPublish >= 100) {
+            lastEnginePackPublish = now;
 
             // Расчёт остатка топлива: fuel_base - fuel_used, округление до 0.1
             float fuelCalc = fuelBase - currentFuelUsed;
@@ -335,39 +320,39 @@ void simulatorTask(void* parameter) {
             pack.instant_fuel      = getInstantFuel();
             pack.distance          = currentDistance;
             pack.fuel_used         = currentFuelUsed;
-            pack.fuel_level_sensor = fuelLevelSensor;  // Округлён до 0.1 л
-            pack.not_fuel          = true;             // Датчика нет, Simulator считает сам
+            pack.fuel_level_sensor = fuelLevelSensor;
+            pack.not_fuel          = true;
             pack.gear              = 0;
             strcpy(pack.selector_pos, "D");
             pack.tcc_lockup        = false;
 
-            db.publishPacket(TOPIC_ENGINE_PACK, &pack, sizeof(pack));
+            dr.publishPacket(TOPIC_ENGINE_PACK, &pack, sizeof(pack));
         }
 
         // ====== 6. Обработка команд ======
         if (cmdQueue) processCommands(cmdQueue);
 
         // ====== 7. Чтение TripPack (fuel_base) ======
-        BusMessage msg;
-        if (tripQ && xQueueReceive(tripQ, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
+        if (tripQ) {
             TripPack p;
-            memcpy(&p, msg.value.s, sizeof(TripPack));
-            if (p.fuel_level > 0 && fuelBase < 0.1f) {
-                fuelBase = p.fuel_level;
-                fuelLevelSensor = fuelBase;
-                Serial.printf("[Simulator] fuel_base from Storage: %.1f L\n", fuelBase);
+            if (xQueueReceive(tripQ, &p, 0) == pdTRUE) {
+                if (p.fuel_level > 0 && fuelBase < 0.1f) {
+                    fuelBase = p.fuel_level;
+                    fuelLevelSensor = fuelBase;
+                    Serial.printf("[Simulator] fuel_base from Storage: %.1f L\n", fuelBase);
+                }
             }
-            busMessageFree(&msg);
         }
 
         // ====== 8. Чтение настроек ======
-        if (cfgQueue) {
-            BusMessage msg;
-            if (xQueueReceive(cfgQueue, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
-                SettingsPack pack;
-                memcpy(&pack, msg.value.s, sizeof(SettingsPack));
+        if (cfgQ) {
+            SettingsPack pack;
+            if (xQueueReceive(cfgQ, &pack, 0) == pdTRUE) {
+                if (!storageInit) {
+                    storageInit = true;
+                    Serial.printf("[Simulator] SettingsPack from storage: tank=%.1f\n", pack.tank_capacity);
+                }
                 tankCapacity = pack.tank_capacity;
-                busMessageFree(&msg);
             }
         }
 

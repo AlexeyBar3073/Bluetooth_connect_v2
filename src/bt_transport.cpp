@@ -4,7 +4,7 @@
 // -----------------------------------------------------------------------------
 
 #include "bt_transport.h"
-#include "data_bus.h"
+#include "data_router.h"
 #include "topics.h"
 #include <BluetoothSerial.h>
 
@@ -16,6 +16,9 @@ static bool            isRunningFlag = false;
 static unsigned long   lastHeartbeat = 0;
 static char            rxBuffer[256];
 
+// --- Очереди (создаются модулем, регистрируются в DataRouter) ---
+static QueueHandle_t   txQueue = NULL;       // Входящий JSON от Android → BT → шина
+
 // =============================================================================
 // btTransportTask — Задача
 // =============================================================================
@@ -23,15 +26,13 @@ static char            rxBuffer[256];
 void btTransportTask(void* parameter) {
     (void)parameter;
     isRunningFlag = true;
-    DataBus& db = DataBus::getInstance();
+    DataRouter& dr = DataRouter::getInstance();
 
-    // Подписка на исходящие данные (FIFO_DROP, depth=5)
-    // ACK-квитанции и телеметрия идут в одной очереди.
-    // FIFO_DROP, depth=3 — достаточно для буферизации ACK + телеметрии
-    SubscriberOpts txOpts = {QUEUE_FIFO_DROP, 3, false};
-    QueueHandle_t txQueue = db.subscribe(TOPIC_MSG_OUTGOING, txOpts);
+    // Создаём очередь для исходящих данных (FIFO_DROP)
+    txQueue = xQueueCreate(3, 256);  // 3 слота × 256 байт (строки JSON)
+    dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::FIFO_DROP);
 
-    Serial.println("[BT Transport] Task running (Queue-based)");
+    Serial.println("[BT Transport] Task running (DataRouter-based)");
 
     while (1) {
         lastHeartbeat = millis();
@@ -39,7 +40,7 @@ void btTransportTask(void* parameter) {
         bool isConnected = SerialBT.hasClient();
         if (isConnected != wasConnected) {
             wasConnected = isConnected;
-            db.publish(TOPIC_TRANSPORT_STATUS, isConnected);
+            dr.publish(TOPIC_TRANSPORT_STATUS, isConnected);
             Serial.printf("[BT Transport] %s\n", isConnected ? "CONNECTED" : "DISCONNECTED");
         }
 
@@ -53,49 +54,46 @@ void btTransportTask(void* parameter) {
             while (end > start && (*end == ' ' || *end == '\r' || *end == '\t')) *end-- = '\0';
 
             if (strlen(start) > 0) {
-                db.publish(TOPIC_MSG_INCOMING, start);
+                dr.publishString(TOPIC_MSG_INCOMING, start);
             }
         }
 
-        // --- TX: DataBus → SerialBT ---
-        // SerialBT.availableForWrite() не работает для SPP — всегда 0.
-        // Отправляем напрямую, проверяем результат записи.
+        // --- TX: DataRouter → SerialBT ---
         if (SerialBT.hasClient()) {
-            BusMessage msg;
-            if (txQueue && xQueueReceive(txQueue, &msg, pdMS_TO_TICKS(50)) == pdTRUE) {
-                if (msg.type == TYPE_STRING) {
-                    // Данные уже содержат \n от Protocol. Используем print(),
-                    // чтобы избежать двойного \r\n от println().
-                    size_t sent = SerialBT.print(msg.value.s);
-                    if (sent == 0) {
-                        // SPP буфер переполнен — Android не потребляет данные.
-                        // Не логируем каждый раз, чтобы не спамить Serial.
-                        static unsigned long lastCongestionLog = 0;
-                        unsigned long now = millis();
-                        if (now - lastCongestionLog > 5000) {
-                            lastCongestionLog = now;
-                            Serial.printf("[BT TX] SPP congested! Android не читает (%zu/%zu sent)\n",
-                                          sent, strlen(msg.value.s));
-                        }
+            char txBuffer[256];
+            if (txQueue && xQueueReceive(txQueue, txBuffer, pdMS_TO_TICKS(50)) == pdTRUE) {
+                // txBuffer содержит строку JSON (null-terminated, но может быть не полный)
+                // DataRouter.publishString копирует strlen() байт, так что нужно аккуратно
+                // На самом деле очередь создаётся с размером элемента 256,
+                // но строка может быть короче. xQueueReceive копирует весь элемент.
+                // Нужно использовать только до первого '\0'.
+                
+                size_t sent = SerialBT.print(txBuffer);
+                if (sent == 0) {
+                    static unsigned long lastCongestionLog = 0;
+                    unsigned long now = millis();
+                    if (now - lastCongestionLog > 5000) {
+                        lastCongestionLog = now;
+                        Serial.printf("[BT TX] SPP congested! Android не читает (%zu/%zu sent)\n",
+                                      sent, strlen(txBuffer));
                     }
-                    // --- Логирование ack_id (только при успешной отправке) ---
-                    if (sent > 0) {
-                        static int lastAckId = -1;
-                        static int txCount = 0;
-                        txCount++;
-                        const char* ackPtr = strstr(msg.value.s, "\"ack_id\":");
-                        if (ackPtr) {
-                            ackPtr += 9;
-                            int currentAck = atoi(ackPtr);
-                            if (currentAck != lastAckId) {
-                                lastAckId = currentAck;
-                                Serial.printf("[BT TX] #%d ack_id=%d\n", txCount, lastAckId);
-                            }
-                        }
-                    }
-                    // --- Конец логирования ---
                 }
-                busMessageFree(&msg);
+                // --- Логирование ack_id ---
+                if (sent > 0) {
+                    static int lastAckId = -1;
+                    static int txCount = 0;
+                    txCount++;
+                    const char* ackPtr = strstr(txBuffer, "\"ack_id\":");
+                    if (ackPtr) {
+                        ackPtr += 9;
+                        int currentAck = atoi(ackPtr);
+                        if (currentAck != lastAckId) {
+                            lastAckId = currentAck;
+                            Serial.printf("[BT TX] #%d ack_id=%d\n", txCount, lastAckId);
+                        }
+                    }
+                }
+                // --- Конец логирования ---
             }
         }
 
@@ -122,7 +120,7 @@ void btTransportStart(const char* deviceName) {
     Serial.printf("[BT Transport] Started: '%s'\n", deviceName);
 
     wasConnected = SerialBT.hasClient();
-    DataBus::getInstance().publish(TOPIC_TRANSPORT_STATUS, wasConnected);
+    DataRouter::getInstance().publish(TOPIC_TRANSPORT_STATUS, wasConnected);
 
     xTaskCreatePinnedToCore(btTransportTask, "BT_Transport", 4096, NULL, 2, &btTaskHandle, 1);
 }

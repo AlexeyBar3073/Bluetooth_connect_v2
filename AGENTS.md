@@ -1,8 +1,8 @@
 # AGENTS.md — Правила работы с проектом Bluetooth_connect_v2
 
-> **Последнее обновление:** 2026-04-07
-> **Текущая версия:** 5.0.0 (build 0)
-> **Заметка:** MAJOR: Переход на агрегированные пакеты (EnginePack, TripPack, ServicePack, SettingsPack)
+> **Последнее обновление:** 2026-04-09
+> **Текущая версия:** 6.0.0 (build 0)
+> **Заметка:** MAJOR: DataRouter — типизированные топики, очереди у модулей, без BusMessage
 
 ---
 
@@ -12,7 +12,7 @@
 
 **Платформа:** ESP32 WEMOS D1 MINI32 (Espressif32, Arduino framework, FreeRTOS)
 
-**Архитектура v5.0.0:** Агрегированные пакеты вместо отдельных топиков. 47 топиков → 9 пакетных топиков. Экономия RAM ~50 КБ, исключены гонки состояний.
+**Архитектура v6.0.0:** DataRouter — типизированные топики, очереди принадлежат модулям, нет единого BusMessage. Экономия RAM ~10 КБ, каждый топик использует очередь точно под свой тип данных.
 
 ---
 
@@ -22,69 +22,69 @@
 
 | Изменение | Что менять | Пример |
 |-----------|-----------|--------|
-| **Кардинальное изменение** архитектуры | `MAJOR`, MINOR=0, BUILD=0 | Переход на пакеты → `5.0.0` |
-| **Новый модуль/участник** в системе | `MINOR` +1, BUILD=0 | Добавлен WiFi → `5.1.0` |
-| **Новая функциональность** (команда, экран) | `MINOR` +1, BUILD=0 | Команда kl_pump_atf → `5.1.0` |
-| **Исправление ошибок**, рефакторинг без смены логики | `BUILD` +1 | Фикс расчёта TripPack → `5.0.1` |
+| **Кардинальное изменение** архитектуры | `MAJOR`, MINOR=0, BUILD=0 | DataRouter → `6.0.0` |
+| **Новый модуль/участник** в системе | `MINOR` +1, BUILD=0 | Добавлен WiFi → `6.1.0` |
+| **Новая функциональность** (команда, экран) | `MINOR` +1, BUILD=0 | Команда kl_pump_atf → `6.1.0` |
+| **Исправление ошибок**, рефакторинг без смены логики | `BUILD` +1 | Фикс расчёта TripPack → `6.0.1` |
 | **Поправка в тексте** (комменты, логи) | Ничего | — |
 
 **Где менять:** `include/app_config.h` — `FW_VERSION_MAJOR`, `FW_VERSION_MINOR`, `FW_VERSION_BUILD`, `FW_VERSION_STR`, `FW_VERSION_NOTE`
 
 ---
 
-## 🏗️ АРХИТЕКТУРА (v5.0.0 — Пакетная)
+## 🏗️ АРХИТЕКТУРА (v6.0.0 — DataRouter)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                   DataBus v5.0 (Singleton)                      │
-│         Async Queue (128) + Dispatcher Task (P5:Core1)          │
-│      publish/publishPacket → xQueueSend → dispatch → callbacks  │
+│               DataRouter v6.0 (Singleton)                       │
+│  Типизированные топики, модуль создаёт очередь → subscribe()    │
+│         publish() → memcpy в очереди подписчиков                │
 └──────┬──────────┬───────────┬──────────┬────────────┬───────────┘
        │          │           │          │            │
 ┌──────▼──┐  ┌───▼────┐  ┌──▼─────┐  ┌─▼────────┐ ┌▼──────────┐
 │Simulator│  │Calc-   │  │Proto-  │  │ Storage  │ │  BT Trans │
 │  Task   │  │ ulator │  │  col   │  │   Task   │ │   port    │
-│EnginePack│ │TripPack│  │  Task  │  │  (NVS)   │ │SPP ↔ Bus  │
+│EnginePack│ │TripPack│  │  Task  │  │  (NVS)   │ │SPP ↔ Router│
 └──────┬──┘  └───┬────┘  └──┬─────┘  └─┬────────┘ └───────────┘
        │         │           │           │
 ┌──────▼──┐ ┌───▼────┐ ┌───▼─────┐
 │  K-Line │ │Climate │ │  OLED   │
 │ Task    │ │  Task  │ │  Task   │
-│ServiceP │ │ServiceP│ │Display  │
+│KlinePack│ │ClimateP│ │Display  │
 └─────────┘ └────────┘ └─────────┘
 ```
 
 ### Ключевые принципы
 
-1. **Модули НЕ знают друг о друге** — общение ТОЛЬКО через DataBus.
-2. **Агрегированные пакеты** — связанные параметры передаются атомарно:
-   - `EnginePack` → скорость, RPM, напряжение, статус, расстояние, расход
-   - `TripPack` → одометр, Trip A/B, Fuel A/B, avg, fuel_level
-   - `ServicePack` → температуры, DTC, климат, давление шин, омывайка
-   - `SettingsPack` → бак, форсунки, датчик скорости, протокол К-Line
-3. **Simulator — виртуальный двигатель:**
+1. **Модули НЕ знают друг о друге** — общение ТОЛЬКО через DataRouter.
+2. **Очередь создаётся МОДУЛЕМ** — `xQueueCreate()` у себя, затем `DataRouter.subscribe()`.
+3. **Типизированные топики** — каждый топик имеет свой тип данных:
+   - `TOPIC_CMD` → `uint8_t` (enum Command, 1 байт)
+   - `TOPIC_ENGINE_PACK` → `EnginePack` (27 байт)
+   - `TOPIC_MSG_INCOMING` → `char[256]` (JSON-строка)
+   - `TOPIC_TRANSPORT_STATUS` → `bool` (1 байт)
+4. **Simulator — виртуальный двигатель:**
    - Кнопка (GPIO26) и педаль (GPIO33) обрабатываются ВНУТРИ СЕБЯ
    - Физика (RPM, Speed, Fuel) считается ВНУТРИ СЕБЯ
    - Публикует EnginePack каждые 100 мс
-4. **Calculator — обогащатель данных:**
+5. **Calculator — обогащатель данных:**
    - Подписывается на EnginePack (distance, fuel_used, eng)
    - Считает ODO, Trip, Avg по формуле: `current = base + accumulated`
    - Публикует TripPack каждые 1000 мс
-5. **Нет String в шине** — используем `char[]` / `const char*`.
-6. **publish() возвращает bool** — проверка успешности доставки.
+6. **Нет String в шине** — используем `char[]` / `const char*`.
+7. **publish() возвращает bool** — проверка успешности доставки.
 
 ---
 
 ## 📦 МОДУЛИ
 
-### DataBus (data_bus.h/cpp)
-- **Роль:** Центральная асинхронная шина (Pub/Sub)
-- **Механизм:** FreeRTOS Queue (128) + Dispatcher Task (приоритет 5, ядро 1)
-- **Типы данных:** float, bool, const char*, CmdPayload, бинарные пакеты (до 256 байт)
-- **Методы publish:** `publish(topic, float/bool/int/double)`, `publishPacket(topic, data, len)`, `publishCmd(topic, cmd)`, `publishDirect(topic, str)`
-- **Кэш:** Хранит последние значения для `getFloat()`, `getBool()`, `getString()`
-- **Пакеты:** Копируются в BusEvent (до BUS_PACKET_MAX=256 байт)
-- **Нельзя:** вызывать callback напрямую из publish, использовать String, блокировать Dispatcher
+### DataRouter (data_router.h/cpp)
+- **Роль:** Центральная асинхронная шина (Pub/Sub) с типизированными топиками
+- **Механизм:** Модуль создаёт очередь → `subscribe()` → `publish()` копирует в очереди
+- **Типы данных:** float, bool, int, double, uint8_t (команды), char[] (строки), бинарные пакеты
+- **Методы publish:** `publish(topic, value)`, `publishPacket(topic, data, len)`, `publishString(topic, str)`
+- **Кэш:** Хранит последние значения для `bool`, `Command`
+- **Нельзя:** вызывать callback напрямую из publish, использовать String, блокировать publish()
 
 ### Topics (topics.h)
 - **Роль:** Реестр тем шины данных (9 топиков)

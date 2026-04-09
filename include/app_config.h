@@ -41,11 +41,11 @@
 // MINOR (0) — Новая функциональность
 // BUILD (0) — Исправление ошибок
 //
-#define FW_VERSION_MAJOR 5
-#define FW_VERSION_MINOR 1
+#define FW_VERSION_MAJOR 6
+#define FW_VERSION_MINOR 0
 #define FW_VERSION_BUILD 0
-#define FW_VERSION_STR   "5.1.0"
-#define FW_VERSION_NOTE  "KlinePack/ClimatePack split, Protocol-only ack_id, fractional telemetry"
+#define FW_VERSION_STR   "6.0.0"
+#define FW_VERSION_NOTE  "DataRouter: typed topics, module-owned queues, no BusMessage"
 
 // =============================================================================
 // Аппаратные пины

@@ -12,7 +12,7 @@
 // -----------------------------------------------------------------------------
 
 #include "oled_task.h"
-#include "data_bus.h"
+#include "data_router.h"
 #include "topics.h"
 #include "packets.h"
 #include "icons.h"
@@ -103,30 +103,34 @@ void oledTask(void* parameter) {
     delay(10);
     u8g2.begin();
 
-    // Приветственный экран (неблокирующий)
+    // Приветственный экран
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tr);
     u8g2.setCursor(0, 10); u8g2.print("Car BKV2");
     u8g2.setCursor(0, 25); u8g2.print("ESP32 + OLED");
     u8g2.setCursor(0, 40); u8g2.print("Pub/Sub Arch");
     u8g2.sendBuffer();
-    lastHeartbeat = millis();  // Обновляем heartbeat ПЕРЕД задержкой!
+    lastHeartbeat = millis();
     vTaskDelay(500 / portTICK_PERIOD_MS);
 
-    // Подписки
-    SubscriberOpts pktOpts = {QUEUE_OVERWRITE, 1, false};
-    DataBus& db = DataBus::getInstance();
-    QueueHandle_t engineQ = db.subscribe(TOPIC_ENGINE_PACK, pktOpts);
-    QueueHandle_t tripQ = db.subscribe(TOPIC_TRIP_PACK, pktOpts);
-    QueueHandle_t btQ = db.subscribe(TOPIC_TRANSPORT_STATUS, pktOpts);
+    // Подписки через DataRouter (модуль создаёт очередь → subscribe)
+    DataRouter& dr = DataRouter::getInstance();
+
+    QueueHandle_t engineQ = xQueueCreate(1, sizeof(EnginePack));
+    QueueHandle_t tripQ   = xQueueCreate(1, sizeof(TripPack));
+    QueueHandle_t btQ     = xQueueCreate(1, sizeof(bool));
+
+    dr.subscribe(TOPIC_ENGINE_PACK,    engineQ, QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_TRIP_PACK,      tripQ,   QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_TRANSPORT_STATUS, btQ,   QueuePolicy::OVERWRITE, true);  // retain
 
     // Начальный BT статус из кэша
-    BusMessage cached;
-    if (db.getCached(TOPIC_TRANSPORT_STATUS, cached) && cached.type == TYPE_BOOL) {
-        displayBtConnected = cached.value.b;
+    bool btState;
+    if (dr.getCached(TOPIC_TRANSPORT_STATUS, btState)) {
+        displayBtConnected = btState;
     }
 
-    Serial.println("[OLED] Ready (Queue-based)");
+    Serial.println("[OLED] Ready (DataRouter-based)");
 
     unsigned long lastUpdate = 0;
 
@@ -134,29 +138,26 @@ void oledTask(void* parameter) {
         lastHeartbeat = millis();
 
         // Чтение EnginePack
-        BusMessage msg;
-        if (engineQ && xQueueReceive(engineQ, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
-            EnginePack p; memcpy(&p, msg.value.s, sizeof(EnginePack));
-            displaySpeed = p.speed;
-            displayRpm = p.rpm;
-            displayVoltage = p.voltage;
-            displayEngine = p.engine_running;
-            displayParkingLights = p.parking_lights;
-            busMessageFree(&msg);
+        EnginePack pEng;
+        if (engineQ && xQueueReceive(engineQ, &pEng, 0) == pdTRUE) {
+            displaySpeed = pEng.speed;
+            displayRpm = pEng.rpm;
+            displayVoltage = pEng.voltage;
+            displayEngine = pEng.engine_running;
+            displayParkingLights = pEng.parking_lights;
         }
 
         // Чтение TripPack
-        if (tripQ && xQueueReceive(tripQ, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
-            TripPack p; memcpy(&p, msg.value.s, sizeof(TripPack));
-            displayFuel = p.fuel_level;
-            displayConsumption = p.avg_consumption;
-            busMessageFree(&msg);
+        TripPack pTrip;
+        if (tripQ && xQueueReceive(tripQ, &pTrip, 0) == pdTRUE) {
+            displayFuel = pTrip.fuel_level;
+            displayConsumption = pTrip.avg_consumption;
         }
 
         // Чтение BT статуса
-        if (btQ && xQueueReceive(btQ, &msg, 0) == pdTRUE) {
-            if (msg.type == TYPE_BOOL) displayBtConnected = msg.value.b;
-            busMessageFree(&msg);
+        bool btVal;
+        if (btQ && xQueueReceive(btQ, &btVal, 0) == pdTRUE) {
+            displayBtConnected = btVal;
         }
 
         // Обновление дисплея каждые 200 мс

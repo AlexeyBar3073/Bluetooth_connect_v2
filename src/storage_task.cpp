@@ -11,7 +11,7 @@
 // -----------------------------------------------------------------------------
 
 #include "storage_task.h"
-#include "data_bus.h"
+#include "data_router.h"
 #include "topics.h"
 #include "packets.h"
 #include <Preferences.h>
@@ -43,9 +43,7 @@ static bool          settingsValid = false;
 // =============================================================================
 
 static bool tripPackChanged(const TripPack& a, const TripPack& b) {
-    // Сравниваем ТОЛЬКО base-значения — то, что реально сохраняется в NVS.
-    // trip_cur/fuel_cur меняются постоянно — их не сохраняем.
-    const float F_EPS = 0.1f;  // Увеличенный допуск для fuel
+    const float F_EPS = 0.1f;
     if (a.version != b.version) return true;
     if (fabs((double)a.odo - (double)b.odo) > F_EPS) return true;
     if (fabsf(a.trip_a - b.trip_a) > F_EPS) return true;
@@ -53,6 +51,7 @@ static bool tripPackChanged(const TripPack& a, const TripPack& b) {
     if (fabsf(a.fuel_trip_a - b.fuel_trip_a) > F_EPS) return true;
     if (fabsf(a.fuel_trip_b - b.fuel_trip_b) > F_EPS) return true;
     if (fabsf(a.fuel_level - b.fuel_level) > F_EPS) return true;
+    if (fabsf(a.avg_total - b.avg_total) > F_EPS) return true;
     // trip_cur, fuel_cur, avg_consumption — не сохраняем, пересчитываются
     return false;
 }
@@ -72,10 +71,12 @@ static bool settingsPackChanged(const SettingsPack& a, const SettingsPack& b) {
 // storageTask — Главная задача
 // =============================================================================
 
-void storageTask(void* parameter) {
-    (void)parameter;
-    isRunningFlag = true;
-    DataBus& db = DataBus::getInstance();
+// =============================================================================
+// loadAndPublish — загрузка из NVS и публикация
+// =============================================================================
+
+static bool loadAndPublish() {
+    DataRouter& dr = DataRouter::getInstance();
 
     prefs.begin(NS, false);
 
@@ -83,14 +84,15 @@ void storageTask(void* parameter) {
     TripPack tripPack;
     memset(&tripPack, 0, sizeof(tripPack));
     size_t len = prefs.getBytes(KEY_TRIP, &tripPack, sizeof(tripPack));
-    if (len != sizeof(TripPack) || tripPack.version != 1) {
-        tripPack.version = 1;
+    if (len != sizeof(TripPack) || tripPack.version < 1 || tripPack.version > 2) {
+        tripPack.version = 2;
         tripPack.fuel_level = 60.0f;
         Serial.println("[Storage] TripPack: defaults");
     } else {
         Serial.println("[Storage] TripPack: loaded");
+        Serial.printf("[Storage]   ODO=%.0f, tripA=%.1f, tripB=%.1f, fuel=%.1f, avg_total=%.1f\n",
+                      tripPack.odo, tripPack.trip_a, tripPack.trip_b, tripPack.fuel_level, tripPack.avg_total);
     }
-    // Сохраняем копию для сравнения
     savedTrip = tripPack;
     tripValid = true;
 
@@ -109,35 +111,44 @@ void storageTask(void* parameter) {
     } else {
         Serial.println("[Storage] SettingsPack: loaded");
     }
-    // Сохраняем копию для сравнения
     savedSettings = settingsPack;
     settingsValid = true;
 
     prefs.end();
 
-    // --- Публикация начальных данных ---
-    db.publishPacket(TOPIC_TRIP_PACK, &tripPack, sizeof(tripPack));
-    db.publishPacket(TOPIC_SETTINGS_PACK, &settingsPack, sizeof(settingsPack));
-    Serial.println("[Storage] Initial data published");
+    // --- Публикация начальных данных через DataRouter (кэш будет установлен) ---
+    dr.publishPacket(TOPIC_TRIP_PACK, &tripPack, sizeof(tripPack));
+    dr.publishPacket(TOPIC_SETTINGS_PACK, &settingsPack, sizeof(settingsPack));
+    Serial.println("[Storage] Initial data published (DataRouter)");
+
+    return true;
+}
+
+// =============================================================================
+// storageTask — Задача сохранения в NVS
+// =============================================================================
+
+void storageTask(void* parameter) {
+    (void)parameter;
+    isRunningFlag = true;
 
     // --- Подписка на изменения для сохранения ---
-    SubscriberOpts saveOpts = {QUEUE_OVERWRITE, 1, false};
-    QueueHandle_t tripQ = db.subscribe(TOPIC_TRIP_PACK, saveOpts);
-    QueueHandle_t settingsQ = db.subscribe(TOPIC_SETTINGS_PACK, saveOpts);
+    QueueHandle_t tripQ      = xQueueCreate(1, sizeof(TripPack));
+    QueueHandle_t settingsQ  = xQueueCreate(1, sizeof(SettingsPack));
 
-    Serial.println("[Storage] Task running (Queue-based, Binary NVS)");
+    DataRouter& dr = DataRouter::getInstance();
+    dr.subscribe(TOPIC_TRIP_PACK,     tripQ,     QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE);
+
+    Serial.println("[Storage] Task running (DataRouter, Binary NVS)");
 
     while (1) {
         lastHeartbeat = millis();
+        unsigned long now = millis();
 
         // Сохранение TripPack при изменении (throttle 60 сек)
-        BusMessage msg;
-        unsigned long now = millis();
-        if (xQueueReceive(tripQ, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
-            TripPack p;
-            memcpy(&p, msg.value.s, sizeof(TripPack));
-
-            // Сохраняем только если данные реально изменились
+        TripPack p;
+        if (xQueueReceive(tripQ, &p, 0) == pdTRUE) {
             if (now - lastTripSaveTime >= TRIP_THROTTLE_MS) {
                 if (!tripValid || tripPackChanged(p, savedTrip)) {
                     lastTripSaveTime = now;
@@ -149,27 +160,22 @@ void storageTask(void* parameter) {
                     Serial.printf("[Storage] TripPack saved: ODO=%.0f\n", p.odo);
                 }
             }
-            busMessageFree(&msg);
         }
 
-        // Сохранение SettingsPack при изменении (throttle 10 сек)
-        if (xQueueReceive(settingsQ, &msg, 0) == pdTRUE && msg.type == TYPE_STRING) {
-            SettingsPack p;
-            memcpy(&p, msg.value.s, sizeof(SettingsPack));
-
-            // Сохраняем только если данные реально изменились
+        // Сохранение SettingsPack при изменении (throttle 2 сек)
+        SettingsPack sp;
+        if (xQueueReceive(settingsQ, &sp, 0) == pdTRUE) {
             if (now - lastSettingsSaveTime >= SETTINGS_THROTTLE_MS) {
-                if (!settingsValid || settingsPackChanged(p, savedSettings)) {
+                if (!settingsValid || settingsPackChanged(sp, savedSettings)) {
                     lastSettingsSaveTime = now;
-                    savedSettings = p;
+                    savedSettings = sp;
                     settingsValid = true;
                     prefs.begin(NS, false);
-                    prefs.putBytes(KEY_SETTINGS, &p, sizeof(SettingsPack));
+                    prefs.putBytes(KEY_SETTINGS, &sp, sizeof(SettingsPack));
                     prefs.end();
                     Serial.println("[Storage] SettingsPack saved");
                 }
             }
-            busMessageFree(&msg);
         }
 
         vTaskDelay(100 / portTICK_PERIOD_MS);
@@ -178,6 +184,9 @@ void storageTask(void* parameter) {
 
 void storageStart() {
     if (!taskHandle) {
+        // Сначала загружаем и публикуем — кэш будет установлен ДО подписки других модулей
+        loadAndPublish();
+        // Потом запускаем задачу сохранения
         xTaskCreatePinnedToCore(storageTask, "Storage", 4096, NULL, 1, &taskHandle, 0);
         Serial.println("[Storage] Started");
     }

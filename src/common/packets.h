@@ -129,11 +129,12 @@ typedef struct {
 //   trip_cur       → "trip_cur"     (float, км)
 //   fuel_cur       → "fuel_cur"     (float, л)
 //   fuel_level     → "fuel"         (float, л)
-//   avg_consumption → "avg"         (float, л/100км)
+//   avg_consumption → "avg_cur"     (float, л/100км)
+//   avg_total      → "avg"          (float, л/100км)
 //
 #pragma pack(push, 1)
 typedef struct {
-    uint8_t  version;           // Версия пакета (текущая: 1)
+    uint8_t  version;           // Версия пакета (текущая: 2)
     double   odo;               // Общий пробег автомобиля (км, одометр, не сбрасывается)
     float    trip_a;            // Пробег поездки A (км, сбрасывается командой reset_trip_a)
     float    fuel_trip_a;       // Расход топлива за поездку A (л, сбрасывается с trip_a)
@@ -143,6 +144,7 @@ typedef struct {
     float    fuel_cur;          // Текущий расход поездки (л, сбрасывается при запуске двигателя)
     float    fuel_level;        // Остаток топлива в баке (л)
     float    avg_consumption;   // Средний расход за текущую поездку (л/100км)
+    float    avg_total;         // Накопленный средний расход за всё время (л/100км)
 } TripPack;
 #pragma pack(pop)
 
