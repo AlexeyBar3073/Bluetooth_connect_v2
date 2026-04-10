@@ -69,9 +69,9 @@ static void updateTestData() {
 // processCommands: Обработка очереди команд TOPIC_CMD
 // =============================================================================
 static void processCommands() {
-    CmdPayload cmd;
+    uint8_t cmd;
     while (xQueueReceive(cmdQueue, &cmd, 0) == pdTRUE) {
-        switch (cmd.cmd) {
+        switch ((Command)cmd) {
             case CMD_KL_GET_DTC:
                 Serial.println("[KLine] DTC request received (will update KlinePack)");
                 break;
@@ -111,7 +111,7 @@ void klineTask(void* parameter) {
     DataRouter& router = DataRouter::getInstance();
 
     // Создаём очередь для команд (модуль сам создаёт очередь)
-    cmdQueue = xQueueCreate(5, sizeof(CmdPayload));
+    cmdQueue = xQueueCreate(5, sizeof(uint8_t));
     if (cmdQueue == NULL) {
         Serial.println("[KLine] ERROR: Failed to create command queue!");
         isRunningFlag = false;

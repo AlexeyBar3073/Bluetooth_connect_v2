@@ -28,9 +28,9 @@ void btTransportTask(void* parameter) {
     isRunningFlag = true;
     DataRouter& dr = DataRouter::getInstance();
 
-    // Создаём очередь для исходящих данных (FIFO_DROP)
-    txQueue = xQueueCreate(3, 256);  // 3 слота × 256 байт (строки JSON)
-    dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::FIFO_DROP);
+    // Создаём очередь для исходящих данных (OVERWRITE, depth=1 — всегда актуальное)
+    txQueue = xQueueCreate(1, 512);  // 1 слот × 512 байт (полный JSON)
+    dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::OVERWRITE);
 
     Serial.println("[BT Transport] Task running (DataRouter-based)");
 

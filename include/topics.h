@@ -122,7 +122,7 @@ enum Topic : uint8_t {
     // Кто подписан: OLED, Protocol.
 
     TOPIC_CORRECT_ODO      = 0xF5,
-    // Корректировка одометра (float — новое значение ODO в км).
+    // Корректировка одометра (int — новое значение ODO в км, до 9 000 000).
     // Кто публикует: Protocol Task (парсинг JSON correct_odo).
     // Кто подписан: Calculator Task (обновление odo_base).
     // Политика: QUEUE_OVERWRITE, depth=1.

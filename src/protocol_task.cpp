@@ -197,10 +197,8 @@ static void publishOutgoing(JsonDocument& doc) {
     // Отправляем напрямую через BT
     btSend(outBuffer);
 
-    // Короткие JSON дублируем в шину (для отладки)
-    if (strlen(outBuffer) < 256) {
-        DataRouter::getInstance().publishString(TOPIC_MSG_OUTGOING, outBuffer);
-    }
+    // Все JSON дублируем в шину (для отладки)
+    DataRouter::getInstance().publishString(TOPIC_MSG_OUTGOING, outBuffer);
 }
 
 // =============================================================================
@@ -244,9 +242,9 @@ static void processIncoming(QueueHandle_t q) {
             JsonDocument resp;
             injectAckId(resp);
             JsonObject c = resp["cfg"].to<JsonObject>();
-            c["tank"] = cfg.tank; c["inj_perf"] = cfg.inj_perf;
-            c["inj_cnt"] = cfg.inj_cnt; c["spd_sig"] = cfg.spd_sig;
-            c["kl_proto"] = cfg.kl_proto; c["fw"] = FW_VERSION_STR;
+            c["tV"] = cfg.tank; c["iPerf"] = cfg.inj_perf;
+            c["iCnt"] = cfg.inj_cnt; c["sSig"] = cfg.spd_sig;
+            c["kPrt"] = cfg.kl_proto; c["fw"] = FW_VERSION_STR;
             publishOutgoing(resp);
             continue;
         }
@@ -265,11 +263,11 @@ static void processIncoming(QueueHandle_t q) {
             pack.pulses_per_meter = cfg.spd_sig;
             pack.kline_protocol = cfg.kl_proto;
 
-            if (data["tank"]) pack.tank_capacity = data["tank"].as<float>();
-            if (data["inj_perf"]) pack.injector_flow = data["inj_perf"].as<float>();
-            if (data["inj_cnt"]) pack.injector_count = data["inj_cnt"].as<int>();
-            if (data["spd_sig"]) pack.pulses_per_meter = data["spd_sig"].as<float>();
-            if (data["kl_proto"]) pack.kline_protocol = data["kl_proto"].as<int>();
+            if (data["tV"]) pack.tank_capacity = data["tV"].as<float>();
+            if (data["iPerf"]) pack.injector_flow = data["iPerf"].as<float>();
+            if (data["iCnt"]) pack.injector_count = data["iCnt"].as<int>();
+            if (data["sSig"]) pack.pulses_per_meter = data["sSig"].as<float>();
+            if (data["kPrt"]) pack.kline_protocol = data["kPrt"].as<int>();
 
             DataRouter::getInstance().publishPacket(TOPIC_SETTINGS_PACK, &pack, sizeof(pack));
 
@@ -316,14 +314,14 @@ static void processIncoming(QueueHandle_t q) {
         else if (strcmp(cmd, "correct_odo") == 0) {
             // Параметрическая команда — публикуем в отдельный топик
             // Android шлёт: {"data": 123456} или {"data":{"value":123456}}
-            double odo_value = 0.0;
-            if (doc["data"].is<double>()) {
-                odo_value = doc["data"].as<double>();
-            } else if (doc["data"]["value"].is<double>()) {
-                odo_value = doc["data"]["value"].as<double>();
+            int odo_value = 0;
+            if (doc["data"].is<int>()) {
+                odo_value = doc["data"].as<int>();
+            } else if (doc["data"]["value"].is<int>()) {
+                odo_value = doc["data"]["value"].as<int>();
             }
             DataRouter::getInstance().publish(TOPIC_CORRECT_ODO, odo_value);
-            Serial.printf("[Protocol] correct_odo: %.1f km\n", odo_value);
+            Serial.printf("[Protocol] correct_odo: %d km\n", odo_value);
             // ACK подмешается в ближайшее исходящее
             continue;
         }
@@ -423,9 +421,9 @@ void protocolTask(void* parameter) {
     dr.subscribe(TOPIC_CLIMATE_PACK,  climateQ,  QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE);
 
-    // Подписка на входящие (FIFO_DROP)
-    QueueHandle_t incomingQ = xQueueCreate(3, 256);
-    dr.subscribe(TOPIC_MSG_INCOMING, incomingQ, QueuePolicy::FIFO_DROP);
+    // Подписка на входящие (OVERWRITE, depth=1 — всегда актуальное, повторная отправка при необходимости)
+    QueueHandle_t incomingQ = xQueueCreate(1, 128);
+    dr.subscribe(TOPIC_MSG_INCOMING, incomingQ, QueuePolicy::OVERWRITE);
 
     Serial.println("[Protocol] Task started (DataRouter, Fractional: FAST 100ms, TRIP 500ms, SERVICE 1000ms)");
 

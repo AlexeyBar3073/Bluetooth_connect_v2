@@ -235,11 +235,11 @@ typedef struct {
 // Размер: 19 байт
 //
 // Маппинг полей в JSON (Protocol Task → get_cfg ответ):
-//   tank_capacity   → "tank"       (float, л)
-//   injector_count  → "inj_cnt"    (int, шт)
-//   injector_flow   → "inj_perf"   (float, мл/мин)
-//   pulses_per_meter → "spd_sig"   (float, имп/м)
-//   kline_protocol  → "kl_proto"   (int, 0=не опр, 1=ISO9141, 2=KWP2000...)
+//   tank_capacity   → "tV"         (float, л)
+//   injector_count  → "iCnt"       (int, шт)
+//   injector_flow   → "iPerf"      (float, мл/мин)
+//   pulses_per_meter → "sSig"      (float, имп/м)
+//   kline_protocol  → "kPrt"       (int, 0=не опр, 1=ISO9141, 2=KWP2000...)
 //
 #pragma pack(push, 1)
 typedef struct {

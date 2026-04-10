@@ -150,13 +150,13 @@ static void processSettingsPack(QueueHandle_t q) {
 }
 
 // =============================================================================
-// processCorrectOdo: Чтение нового значения ODO (double)
+// processCorrectOdo: Чтение нового значения ODO (int)
 // =============================================================================
 static void processCorrectOdo(QueueHandle_t q) {
-    double newOdo;
+    int newOdo;
     if (xQueueReceive(q, &newOdo, 0) == pdTRUE) {
-        Serial.printf("[Calculator] ODO corrected: %.1f km\n", newOdo);
-        odo_base = newOdo;
+        Serial.printf("[Calculator] ODO corrected: %d km\n", newOdo);
+        odo_base = (double)newOdo;
     }
 }
 
@@ -209,7 +209,7 @@ void calculatorTask(void* parameter) {
     QueueHandle_t engineQ     = xQueueCreate(1, sizeof(EnginePack));
     QueueHandle_t tripQ       = xQueueCreate(1, sizeof(TripPack));
     QueueHandle_t settingsQ   = xQueueCreate(1, sizeof(SettingsPack));
-    QueueHandle_t correctOdoQ = xQueueCreate(1, sizeof(double));
+    QueueHandle_t correctOdoQ = xQueueCreate(1, sizeof(int));
     QueueHandle_t cmdQ        = xQueueCreate(5, sizeof(uint8_t));
 
     dr.subscribe(TOPIC_ENGINE_PACK,    engineQ,     QueuePolicy::OVERWRITE);
