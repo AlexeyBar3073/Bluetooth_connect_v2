@@ -127,6 +127,12 @@ enum Topic : uint8_t {
     // Кто подписан: Calculator Task (обновление odo_base).
     // Политика: QUEUE_OVERWRITE, depth=1.
 
+    TOPIC_CALIBRATE_DIST   = 0xF6,
+    // Калибровка датчика скорости (int — пройденное расстояние в метрах).
+    // Кто публикует: Protocol Task (парсинг JSON calibrate_speed_end).
+    // Кто подписан: RealEngine Task (расчёт pulses_per_meter).
+    // Политика: QUEUE_OVERWRITE, depth=1.
+
     TOPIC_COUNT  // Общее количество топиков (для массивов, циклов)
 };
 

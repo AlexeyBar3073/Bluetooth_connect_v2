@@ -72,6 +72,13 @@ static uint8_t  injectorCount  = 4;
 static float    pulsesPerMeter = 3.0f;
 
 // =============================================================================
+// Калибровка датчика скорости
+// =============================================================================
+
+static bool     calibrating      = false;   // true = идёт подсчёт для калибровки
+static uint64_t calPulseCount    = 0;       // импульсы за период калибровки
+
+// =============================================================================
 // Состояние двигателя (обновляется в задаче)
 // =============================================================================
 
@@ -93,6 +100,7 @@ static unsigned long lastHeartbeat = 0;
 static QueueHandle_t cmdQ        = NULL;
 static QueueHandle_t settingsQ   = NULL;
 static QueueHandle_t tripQ       = NULL;
+static QueueHandle_t calibrateQ  = NULL;
 
 // =============================================================================
 // ISR — Форсунка
@@ -136,6 +144,7 @@ static void IRAM_ATTR injectorISR() {
 
 static void IRAM_ATTR shaftISR() {
     shaftPulseCount++;
+    if (calibrating) calPulseCount++;
 }
 
 // =============================================================================
@@ -148,7 +157,17 @@ static void processCommands() {
         if ((Command)cmd == CMD_FULL_TANK) {
             fuelBase = tankCapacity;
             fuelLevel = tankCapacity;
+#if DEBUG_LOG
             Serial.printf("[RealEngine] Full tank: %.1f L\n", fuelLevel);
+#endif
+        }
+        else if ((Command)cmd == CMD_CALIBRATE_SPEED) {
+            // Начало калибровки: сбрасываем счётчик
+            calPulseCount = 0;
+            calibrating = true;
+#if DEBUG_LOG
+            Serial.println("[RealEngine] Calibration START — counting shaft pulses");
+#endif
         }
     }
 }
@@ -183,6 +202,40 @@ static void processTripPack() {
 }
 
 // =============================================================================
+// processCalibrate — приём расстояния от Android, расчёт pulses_per_meter
+// =============================================================================
+
+static void processCalibrate() {
+    int distanceM;
+    if (xQueueReceive(calibrateQ, &distanceM, 0) == pdTRUE) {
+        if (calibrating && distanceM > 0 && calPulseCount > 0) {
+            pulsesPerMeter = (float)calPulseCount / (float)distanceM;
+
+            // Сохраняем в SettingsPack → NVS через DataRouter
+            SettingsPack sp;
+            sp.version           = 1;
+            sp.tank_capacity     = tankCapacity;
+            sp.injector_count    = injectorCount;
+            sp.injector_flow     = injectorFlow;
+            sp.pulses_per_meter  = pulsesPerMeter;
+            sp.kline_protocol    = 0;
+            DataRouter::getInstance().publishPacket(TOPIC_SETTINGS_PACK, &sp, sizeof(sp));
+
+#if DEBUG_LOG
+            Serial.printf("[RealEngine] Calibration END: %llu pulses / %d m = %.3f pulses/m\n",
+                          calPulseCount, distanceM, pulsesPerMeter);
+#endif
+            calibrating = false;
+            calPulseCount = 0;
+        } else if (!calibrating) {
+#if DEBUG_LOG
+            Serial.println("[RealEngine] Calibration: not started, ignoring distance");
+#endif
+        }
+    }
+}
+
+// =============================================================================
 // realEngineTask
 // =============================================================================
 
@@ -192,14 +245,16 @@ static void realEngineTask(void* parameter) {
     DataRouter& router = DataRouter::getInstance();
 
     // Создаём очереди
-    cmdQ      = xQueueCreate(5, sizeof(uint8_t));
-    settingsQ = xQueueCreate(1, sizeof(SettingsPack));
-    tripQ     = xQueueCreate(1, sizeof(TripPack));
+    cmdQ         = xQueueCreate(5, sizeof(uint8_t));
+    settingsQ    = xQueueCreate(1, sizeof(SettingsPack));
+    tripQ        = xQueueCreate(1, sizeof(TripPack));
+    calibrateQ   = xQueueCreate(1, sizeof(int));
 
     // Подписка
     router.subscribe(TOPIC_CMD, cmdQ, QueuePolicy::FIFO_DROP);
     router.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE, true);
     router.subscribe(TOPIC_TRIP_PACK, tripQ, QueuePolicy::OVERWRITE, true);
+    router.subscribe(TOPIC_CALIBRATE_DIST, calibrateQ, QueuePolicy::OVERWRITE);
 
     // Настройка прерываний
     pinMode(INJECTOR_PIN, INPUT_PULLUP);
@@ -230,6 +285,7 @@ static void realEngineTask(void* parameter) {
         processCommands();
         processSettingsPack();
         processTripPack();
+        processCalibrate();
 
         // Публикация EnginePack каждые 100 мс
         unsigned long now = millis();

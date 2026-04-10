@@ -43,9 +43,9 @@
 //
 #define FW_VERSION_MAJOR 6
 #define FW_VERSION_MINOR 2
-#define FW_VERSION_BUILD 0
-#define FW_VERSION_STR   "6.2.0"
-#define FW_VERSION_NOTE  "RealEngine: injector+shaft ISR, INA226 voltage+fuel"
+#define FW_VERSION_BUILD 1
+#define FW_VERSION_STR   "6.2.1"
+#define FW_VERSION_NOTE  "Fix: speed sensor calibration via Android"
 
 // =============================================================================
 // Аппаратные пины

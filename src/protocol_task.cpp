@@ -320,6 +320,31 @@ static void processIncoming(QueueHandle_t q) {
         else if (strcmp(cmd, "kl_reset_adapt") == 0) enumCmd = CMD_KL_RESET_ADAPT;
         else if (strcmp(cmd, "kl_pump_atf") == 0)   enumCmd = CMD_KL_PUMP_ATF;
         else if (strcmp(cmd, "kl_detect_protocol") == 0) enumCmd = CMD_KL_DETECT_PROTO;
+        else if (strcmp(cmd, "calibrate_speed_start") == 0) {
+            DataRouter::getInstance().publish(TOPIC_CMD, CMD_CALIBRATE_SPEED);
+            JsonDocument resp;
+            injectAckId(resp);
+            resp["status"] = "calibration_started";
+            publishOutgoing(resp);
+            continue;
+        }
+        else if (strcmp(cmd, "calibrate_speed_end") == 0) {
+            int distanceM = 0;
+            if (doc["data"].is<int>()) {
+                distanceM = doc["data"].as<int>();
+            } else if (doc["data"]["distance_m"].is<int>()) {
+                distanceM = doc["data"]["distance_m"].as<int>();
+            }
+            if (distanceM > 0) {
+                DataRouter::getInstance().publish(TOPIC_CALIBRATE_DIST, distanceM);
+                Serial.printf("[Protocol] calibrate_speed_end: %d m\n", distanceM);
+            }
+            JsonDocument resp;
+            injectAckId(resp);
+            resp["status"] = "calibration_saved";
+            publishOutgoing(resp);
+            continue;
+        }
         else if (strcmp(cmd, "correct_odo") == 0) {
             // Параметрическая команда — публикуем в отдельный топик
             // Android шлёт: {"data": 123456} или {"data":{"value":123456}}
