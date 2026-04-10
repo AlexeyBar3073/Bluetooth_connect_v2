@@ -24,6 +24,7 @@ extern void calculatorStart();    extern void calculatorStop();    extern bool c
 extern void protocolStart();      extern void protocolStop();      extern bool protocolIsRunning();
 extern void klineStart();         extern void klineStop();         extern bool klineIsRunning();
 extern void climateStart();       extern void climateStop();       extern bool climateIsRunning();
+extern void realEngineStart();    extern void realEngineStop();    extern bool realEngineIsRunning();
 #if OLED_ENABLED
 extern void oledStart();          extern void oledStop();          extern bool oledIsRunning();
 #endif
@@ -34,6 +35,7 @@ static void restartCalculator()  { calculatorStop(); delay(100); calculatorStart
 static void restartProtocol()    { protocolStop();   delay(100); protocolStart(); }
 static void restartKline()       { klineStop();      delay(100); klineStart(); }
 static void restartClimate()     { climateStop();    delay(100); climateStart(); }
+static void restartRealEngine()  { realEngineStop(); delay(100); realEngineStart(); }
 #if OLED_ENABLED
 static void restartDisplay()     { oledStop();       delay(100); oledStart(); }
 #endif
@@ -62,9 +64,14 @@ void setup() {
     storageStart();
     delay(100);
 
-    // 3. Simulator
+    // 3. Engine (Simulator или Real)
+#if REAL_ENGINE_ENABLED
+    Serial.println("[SETUP] 3/9: Real Engine...");
+    realEngineStart();
+#else
     Serial.println("[SETUP] 3/9: Simulator...");
     simulatorStart();
+#endif
     delay(100);
 
     // 4. Calculator
@@ -119,11 +126,18 @@ void loop() {
     if (now - lastCheck >= 100) {
         lastCheck = now;
 
-        // Критичные модули
+        // Критичные модули — Engine (Sim или Real)
+#if REAL_ENGINE_ENABLED
+        if (!realEngineIsRunning()) {
+            Serial.println("[LOOP] CRITICAL: RealEngine crashed! Restarting...");
+            restartRealEngine();
+        }
+#else
         if (!simulatorIsRunning()) {
             Serial.println("[LOOP] CRITICAL: Simulator crashed! Restarting...");
             restartSimulator();
         }
+#endif
         if (!storageIsRunning()) {
             Serial.println("[LOOP] HIGH: Storage crashed! Restarting...");
             restartStorage();
