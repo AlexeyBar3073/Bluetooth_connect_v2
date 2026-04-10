@@ -3,7 +3,7 @@
 // K-Line диагностика (опрос ЭБУ, автоопределение протокола).
 //
 // Назначение:
-// - Подписан на TOPIC_CMD (FIFO_DROP, depth=5) → kl_* команды
+// - Подписан на TOPIC_CMD (QueuePolicy::FIFO_DROP, depth=5) → kl_* команды
 // - Публикует KlinePack в TOPIC_KLINE_PACK каждые 1000 мс
 // - Режим симуляции: тестовые данные (температуры, DTC)
 //
@@ -24,11 +24,11 @@
 //   - Формировать JSON или публиковать в TOPIC_MSG_OUTGOING
 //   - Оперировать msg_id / ack_id
 //
-// ВЕРСИЯ: 5.1.0 — MAJOR: Публикация KlinePack (не ServicePack)
+// ВЕРСИЯ: 6.1.0 — K-Line на DataRouter (typed topics, module-owned queues)
 // -----------------------------------------------------------------------------
 
 #include "kline_task.h"
-#include "data_bus.h"
+#include "data_router.h"
 #include "topics.h"
 #include "packets.h"
 #include "commands.h"
@@ -43,6 +43,9 @@ static bool          isRunningFlag  = false;
 static unsigned long lastHeartbeat  = 0;
 static int           currentProtocol = 0;
 static bool          isRealMode     = false;
+
+// --- Очередь команд (создаётся модулем) ---
+static QueueHandle_t cmdQueue = NULL;
 
 // --- Тестовые данные ---
 static float    testCoolant   = 90.0f;
@@ -65,25 +68,11 @@ static void updateTestData() {
 // =============================================================================
 // processCommands: Обработка очереди команд TOPIC_CMD
 // =============================================================================
-static void processCommands(QueueHandle_t q, DataBus& db) {
-    BusMessage msg;
-    while (xQueueReceive(q, &msg, 0) == pdTRUE) {
-        if (msg.type != TYPE_INT && msg.type != TYPE_CMD) {
-            busMessageFree(&msg);
-            continue;
-        }
-
-        Command cmd;
-        if (msg.type == TYPE_INT) {
-            cmd = (Command)msg.value.i;
-        } else {
-            cmd = msg.cmd.cmd;
-        }
-        busMessageFree(&msg);
-
-        switch (cmd) {
+static void processCommands() {
+    CmdPayload cmd;
+    while (xQueueReceive(cmdQueue, &cmd, 0) == pdTRUE) {
+        switch (cmd.cmd) {
             case CMD_KL_GET_DTC:
-                // K-Line НЕ отправляет JSON! Обновляем данные, Protocol сам соберёт ответ
                 Serial.println("[KLine] DTC request received (will update KlinePack)");
                 break;
 
@@ -119,13 +108,21 @@ static void processCommands(QueueHandle_t q, DataBus& db) {
 void klineTask(void* parameter) {
     (void)parameter;
     isRunningFlag = true;
-    DataBus& db = DataBus::getInstance();
+    DataRouter& router = DataRouter::getInstance();
 
-    // Подписка на команды (FIFO_DROP, depth=5)
-    SubscriberOpts cmdOpts = {QUEUE_FIFO_DROP, 5, false};
-    QueueHandle_t cmdQ = db.subscribe(TOPIC_CMD, cmdOpts);
+    // Создаём очередь для команд (модуль сам создаёт очередь)
+    cmdQueue = xQueueCreate(5, sizeof(CmdPayload));
+    if (cmdQueue == NULL) {
+        Serial.println("[KLine] ERROR: Failed to create command queue!");
+        isRunningFlag = false;
+        vTaskDelete(NULL);
+        return;
+    }
 
-    Serial.println("[KLine] Task started (Queue-based, simulation mode)");
+    // Подписка на команды (FIFO_DROP — не терять команды)
+    router.subscribe(TOPIC_CMD, cmdQueue, QueuePolicy::FIFO_DROP);
+
+    Serial.println("[KLine] Task started (DataRouter, simulation mode)");
 
     unsigned long lastPublish = 0;
 
@@ -133,7 +130,7 @@ void klineTask(void* parameter) {
         lastHeartbeat = millis();
 
         // Обработка команд
-        if (cmdQ) processCommands(cmdQ, db);
+        processCommands();
 
         // Публикация KlinePack каждые 1000 мс
         unsigned long now = millis();
@@ -149,7 +146,7 @@ void klineTask(void* parameter) {
             pack.dtc_count    = (uint8_t)testDtcCount;
             strlcpy(pack.dtc_codes, testDtcCodes, sizeof(pack.dtc_codes));
 
-            db.publishPacket(TOPIC_KLINE_PACK, &pack, sizeof(pack));
+            router.publishPacket(TOPIC_KLINE_PACK, &pack, sizeof(pack));
         }
 
         vTaskDelay(50 / portTICK_PERIOD_MS);
@@ -162,8 +159,8 @@ void klineTask(void* parameter) {
 
 void klineStart() {
     if (!taskHandle) {
-        xTaskCreatePinnedToCore(klineTask, "KLine", TASK_STACK_SIZE, NULL, 2, &taskHandle, 0);
-        Serial.println("[KLine] Started (8K stack, P2)");
+        xTaskCreatePinnedToCore(klineTask, "KLine", TASK_STACK_SIZE, NULL, TASK_PRIORITY_KLINE, &taskHandle, 0);
+        Serial.println("[KLine] Started (P1)");
     }
 }
 
@@ -172,6 +169,10 @@ void klineStop() {
         vTaskDelete(taskHandle);
         taskHandle = NULL;
         isRunningFlag = false;
+        if (cmdQueue != NULL) {
+            vQueueDelete(cmdQueue);
+            cmdQueue = NULL;
+        }
         Serial.println("[KLine] Stopped");
     }
 }

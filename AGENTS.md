@@ -1,8 +1,8 @@
 # AGENTS.md — Правила работы с проектом Bluetooth_connect_v2
 
-> **Последнее обновление:** 2026-04-09
-> **Текущая версия:** 6.0.0 (build 0)
-> **Заметка:** MAJOR: DataRouter — типизированные топики, очереди у модулей, без BusMessage
+> **Последнее обновление:** 2026-04-10
+> **Текущая версия:** 6.1.0 (build 0)
+> **Заметка:** MINOR: K-Line и Climate модули подключены в систему
 
 ---
 
@@ -12,7 +12,7 @@
 
 **Платформа:** ESP32 WEMOS D1 MINI32 (Espressif32, Arduino framework, FreeRTOS)
 
-**Архитектура v6.0.0:** DataRouter — типизированные топики, очереди принадлежат модулям, нет единого BusMessage. Экономия RAM ~10 КБ, каждый топик использует очередь точно под свой тип данных.
+**Архитектура v6.1.0:** DataRouter — типизированные топики, очереди принадлежат модулям, нет единого BusMessage. Все модули (Simulator, Calculator, Protocol, Storage, OLED, K-Line, Climate) подключены и работают через шину.
 
 ---
 
@@ -32,7 +32,7 @@
 
 ---
 
-## 🏗️ АРХИТЕКТУРА (v6.0.0 — DataRouter)
+## 🏗️ АРХИТЕКТУРА (v6.1.0 — DataRouter, все модули подключены)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -154,16 +154,17 @@
 
 ### K-Line (kline_task.cpp) — ДИАГНОСТИКА ЭБУ
 - **Роль:** Опрос ЭБУ по К-Line (симуляция/реальный), автоопределение протокола
-- **Публикует:** ServicePack каждые 1000 мс (температуры, DTC)
-- **Подписан на:** TOPIC_CMD (kl_* команды)
+- **Публикует:** KlinePack каждые 1000 мс в TOPIC_KLINE_PACK (температуры, DTC)
+- **Подписан на:** TOPIC_CMD (kl_* команды, QueuePolicy::FIFO_DROP, depth=5)
+- **Очередь:** модуль создаёт `xQueueCreate(5, sizeof(CmdPayload))` сам
 - **Режим симуляции:** тестовые данные (coolant=85-95°C, atf=70-85°C, DTC="P0135;P0141")
-- **Нельзя:** публиковать ServicePack чаще 1000 мс
+- **Нельзя:** публиковать KlinePack чаще 1000 мс, формировать JSON, использовать DataBus
 
 ### Climate (climate.cpp) — КЛИМАТ/СЕРВИС
 - **Роль:** Чтение сервисных датчиков (или симуляция)
-- **Публикует:** ServicePack каждые 1000 мс (interior_temp, exterior_temp, tire_pressure, washer_level)
+- **Публикует:** ClimatePack каждые 1000 мс в TOPIC_CLIMATE_PACK (interior_temp, exterior_temp, tire_pressure, washer_level)
 - **Режим симуляции:** случайные данные с низким вероятностью предупреждений
-- **Нельзя:** блокировать >100 мс
+- **Нельзя:** блокировать >100 мс, публиковать в KlinePack
 
 ### OLED (oled_task.cpp) — ДИСПЛЕЙ
 - **Роль:** Визуализация на SSD1306 128x64 (I2C, SDA=21, SCL=22)
@@ -239,6 +240,8 @@ Android ──► SerialBT ──► BT Transport ──publish──► TOPIC_M
 
 | Версия | Дата | Описание |
 |--------|------|----------|
+| **6.1.0** | 2026-04-10 | **MINOR: K-Line и Climate модули подключены.** K-Line переведён с DataBus на DataRouter (module-owned queue). Оба модуля запущены в main.cpp, heartbeat-мониторинг добавлен. |
+| **6.0.0** | 2026-04-09 | MAJOR: DataRouter — типизированные топики, очереди у модулей, без BusMessage. Экономия RAM ~10 КБ. |
 | **5.0.0** | 2026-04-07 | **MAJOR: Переход на агрегированные пакеты.** 47 топиков → 9. EnginePack, TripPack, ServicePack, SettingsPack. Бинарное хранение в NVS. Loop-диспетчер с heartbeat. Калькулятор вместо VehicleModel. Новый модуль Climate. |
 | **4.2.1** | 2026-04-05 | Фикс: ACK msg_id тип int, fuel_a/fuel_b накопление. |
 | **4.2.0** | 2026-04-05 | Фикс протокола, Tank/Fuel синхронизация, K-Line dummy DTCs. |
@@ -266,10 +269,11 @@ Android ──► SerialBT ──► BT Transport ──publish──► TOPIC_M
 
 ## 🧠 ЧТО ПОМНИТЬ
 
-1. **DataBus.begin()** — ПЕРЕД запуском любых задач
+1. **DataRouter.begin()** — ПЕРЕД запуском любых задач
 2. **Callback <100 мкс** — только присвоение переменных
 3. **JSON:** `char buffer[512]` + `serializeJson(doc, buffer)`
 4. **Пакеты:** `publishPacket(topic, &pack, sizeof(pack))`
 5. **Команды:** `CmdPayload cmd; memset(&cmd, 0, sizeof(cmd)); cmd.cmd = CMD_...;`
 6. **NVS:** putBytes/getBytes для пакетов, не чаще 100 мс
 7. **Loop:** heartbeat-мониторинг, перезапуск при падении
+8. **Модуль создаёт очередь сам** — `xQueueCreate()`, затем `router.subscribe()`

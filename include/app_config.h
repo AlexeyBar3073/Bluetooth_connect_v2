@@ -25,7 +25,7 @@
 //   - Забывать обновлять AGENTS.md при изменении версии
 //   - Устанавливать MAJOR=0 для продакшн-версии
 //
-// ВЕРСИЯ: 5.0.0 — MAJOR: Переход на агрегированные пакеты (9 вместо 47 топиков)
+// ВЕРСИЯ: 6.1.0 — MINOR: K-Line и Climate модули подключены в систему
 // -----------------------------------------------------------------------------
 
 #ifndef APP_CONFIG_H
@@ -37,15 +37,15 @@
 //
 // Формат: MAJOR.MINOR.BUILD
 //
-// MAJOR (5) — Кардинальное изменение архитектуры (пакеты вместо топиков)
-// MINOR (0) — Новая функциональность
+// MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
+// MINOR (1) — Новые модули в системе (K-Line, Climate)
 // BUILD (0) — Исправление ошибок
 //
 #define FW_VERSION_MAJOR 6
-#define FW_VERSION_MINOR 0
+#define FW_VERSION_MINOR 1
 #define FW_VERSION_BUILD 0
-#define FW_VERSION_STR   "6.0.0"
-#define FW_VERSION_NOTE  "DataRouter: typed topics, module-owned queues, no BusMessage"
+#define FW_VERSION_STR   "6.1.0"
+#define FW_VERSION_NOTE  "K-Line and Climate modules connected"
 
 // =============================================================================
 // Аппаратные пины
