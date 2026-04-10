@@ -98,27 +98,35 @@ static QueueHandle_t tripQ       = NULL;
 // ISR — Форсунка
 // =============================================================================
 //
-// Положительный фронт (оптопара инвертирует):
-//   Rising edge → запоминаем время
-//   Falling edge (следующий rising) → считаем длительность
+// Оптопара инвертирует сигнал:
+//   LOW  (GPIO4) = форсунка открыта  (ЭБУ дал массу)
+//   HIGH (GPIO4) = форсунка закрыта  (ЭБУ убрал массу)
+//
+// Логика:
+//   Falling edge → начало впрыска (запоминаем время)
+//   Rising edge  → конец впрыска (считаем длительность)
 //
 // ВАЖНО: внутри ISR нельзя Serial, malloc, delay!
 //
 static void IRAM_ATTR injectorISR() {
     uint64_t now = esp_timer_get_time();
-    if (injectorEdgeUs == 0) {
-        // Первый фронт — начало впрыска
+    bool pinState = digitalRead(INJECTOR_PIN);
+
+    if (!pinState) {
+        // Falling edge — форсунка ОТКРЫЛАСЬ (ЭБУ дал массу)
         injectorEdgeUs = now;
     } else {
-        // Второй фронт — конец впрыска
+        // Rising edge — форсунка ЗАКРЫЛАСЬ (ЭБУ убрал массу)
+        if (injectorEdgeUs == 0) return;  // Пропуск первого фронта
+
         uint32_t duration = (uint32_t)(now - injectorEdgeUs);
         if (duration >= MIN_INJECTOR_US && duration <= MAX_INJECTOR_US) {
             injectorTotalUs += duration;
             injectorPulses++;
         } else {
-            injectorMissed++;  // Аномальная длительность — возможно пропуск
+            injectorMissed++;  // Аномальная длительность
         }
-        injectorEdgeUs = now;
+        injectorEdgeUs = 0;
     }
 }
 
@@ -196,7 +204,7 @@ static void realEngineTask(void* parameter) {
     // Настройка прерываний
     pinMode(INJECTOR_PIN, INPUT_PULLUP);
     pinMode(SHAFT_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(INJECTOR_PIN), injectorISR, RISING);
+    attachInterrupt(digitalPinToInterrupt(INJECTOR_PIN), injectorISR, CHANGE);
     attachInterrupt(digitalPinToInterrupt(SHAFT_PIN), shaftISR, RISING);
 
     // Инициализация INA226 (I2C, шунт 0.1 Ом)
