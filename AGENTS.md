@@ -1,8 +1,8 @@
 # AGENTS.md — Правила работы с проектом Bluetooth_connect_v2
 
 > **Последнее обновление:** 2026-04-10
-> **Текущая версия:** 6.1.0 (build 0)
-> **Заметка:** MINOR: K-Line и Climate модули подключены в систему
+> **Текущая версия:** 6.1.1 (build 1)
+> **Заметка:** FIX: txBuffer overflow в BT Transport
 
 ---
 
@@ -240,6 +240,7 @@ Android ──► SerialBT ──► BT Transport ──publish──► TOPIC_M
 
 | Версия | Дата | Описание |
 |--------|------|----------|
+| **6.1.1** | 2026-04-10 | FIX: txBuffer overflow — очередь BT Transport 512B, но локальный буфер был 256B → краш при `get_cfg`. |
 | **6.1.0** | 2026-04-10 | **MINOR: K-Line и Climate модули подключены.** K-Line переведён с DataBus на DataRouter (module-owned queue). Оба модуля запущены в main.cpp, heartbeat-мониторинг добавлен. |
 | **6.0.0** | 2026-04-09 | MAJOR: DataRouter — типизированные топики, очереди у модулей, без BusMessage. Экономия RAM ~10 КБ. |
 | **5.0.0** | 2026-04-07 | **MAJOR: Переход на агрегированные пакеты.** 47 топиков → 9. EnginePack, TripPack, ServicePack, SettingsPack. Бинарное хранение в NVS. Loop-диспетчер с heartbeat. Калькулятор вместо VehicleModel. Новый модуль Climate. |

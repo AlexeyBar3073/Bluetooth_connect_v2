@@ -25,7 +25,7 @@
 //   - Забывать обновлять AGENTS.md при изменении версии
 //   - Устанавливать MAJOR=0 для продакшн-версии
 //
-// ВЕРСИЯ: 6.1.0 — MINOR: K-Line и Climate модули подключены в систему
+// ВЕРСИЯ: 6.1.1 — FIX: txBuffer overflow в BT Transport
 // -----------------------------------------------------------------------------
 
 #ifndef APP_CONFIG_H
@@ -43,9 +43,9 @@
 //
 #define FW_VERSION_MAJOR 6
 #define FW_VERSION_MINOR 1
-#define FW_VERSION_BUILD 0
-#define FW_VERSION_STR   "6.1.0"
-#define FW_VERSION_NOTE  "K-Line and Climate modules connected"
+#define FW_VERSION_BUILD 1
+#define FW_VERSION_STR   "6.1.1"
+#define FW_VERSION_NOTE  "Fix: txBuffer overflow in BT Transport"
 
 // =============================================================================
 // Аппаратные пины
