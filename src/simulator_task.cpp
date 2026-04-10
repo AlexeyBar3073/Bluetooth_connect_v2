@@ -24,7 +24,7 @@
 //   - Добавлять новые эмулируемые параметры в EnginePack
 //
 // ❌ Нельзя:
-//   - Вызывать Calculator/VehicleModel напрямую (только через DataBus)
+//   - Вызывать Calculator/VehicleModel напрямую (только через DataRouter)
 //   - Публиковать данные чаще 100 мс
 //   - Писать в NVS напрямую
 //   - Забывать сбрасывать distance/fuel_used при запуске двигателя
@@ -315,6 +315,7 @@ void simulatorTask(void* parameter) {
             pack.version           = 3;
             pack.speed             = currentSpeed;
             pack.rpm               = roundf(currentRpm / 10.0f) * 10.0f;
+            pack.voltage           = getVoltage();
             pack.engine_running    = engineRunning;
             pack.parking_lights    = parkingLights;
             pack.instant_fuel      = getInstantFuel();

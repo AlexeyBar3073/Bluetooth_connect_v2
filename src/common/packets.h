@@ -1,6 +1,6 @@
 // -----------------------------------------------------------------------------
 // packets.h
-// Агрегированные пакеты данных для шины DataBus.
+// Агрегированные пакеты данных для шины DataRouter.
 //
 // Назначение:
 // - Группировка связанных параметров в атомарные структуры
@@ -73,26 +73,26 @@
 // Маппинг полей в JSON (Protocol Task):
 //   speed     → "spd"        (int, км/ч)
 //   rpm       → "rpm"        (int, об/мин)
-//   instant_fuel → "inst"    (float, л/100км или л/ч)
-//   distance  → (внутреннее, не отправляется)
-//   fuel_used → (внутреннее, не отправляется)
-//   fuel_level_sensor → "fuel" (float, л)
+//   voltage   → "vlt"        (float, В)
 //   engine_running → "eng"   (bool)
 //   parking_lights → "hl"    (bool)
+//   instant_fuel → "inst"    (float, л/100км или л/ч)
+//   fuel_level_sensor → "fuel" (float, л)
 //
-// Поля gear, selector_pos, tcc_lockup, voltage — из KlinePack (добавляет Protocol)
+// Поля sel, tcc — из KlinePack (добавляет Protocol в FAST JSON)
 //
 #pragma pack(push, 1)
 typedef struct {
     uint8_t  version;           // Версия пакета (текущая: 3)
     float    speed;             // Скорость автомобиля (км/ч)
     float    rpm;               // Обороты двигателя (об/мин)
+    float    voltage;           // Напряжение бортсети (В)
+    bool     engine_running;    // Двигатель работает (true = запущен)
+    bool     parking_lights;    // Габаритные огни включены (true = вкл)
     float    instant_fuel;      // Мгновенный расход (л/100км при движении, л/ч на холостых)
     float    distance;          // Накопленный пробег за поездку (км, сбрасывается при запуске двигателя)
     float    fuel_used;         // Накопленный расход за поездку (л, сбрасывается при запуске двигателя)
     float    fuel_level_sensor; // Остаток топлива в баке (л, рассчитан EngineModule/Simulator, округлён до 0.1)
-    bool     engine_running;    // Двигатель работает (true = запущен)
-    bool     parking_lights;    // Габаритные огни включены (true = вкл)
     bool     not_fuel;          // true = датчик топлива отсутствует, расход считает Simulator
 } EnginePack;
 #pragma pack(pop)
@@ -165,7 +165,7 @@ typedef struct {
 //   coolant_temp      → "t_cool"     (float, °C)
 //   atf_temp          → "t_atf"      (float, °C)
 //   tcc_lockup        → "tcc"        (bool)
-//   selector_position → "sel"        (int: 0=P, 1=R, 2=N, 3=D, 4=3, 5=2, 6=L)
+//   selector_position → "sel"        (string, комбинированное: "D", "D2", "R", "P"…)
 //   current_gear      → "gear"       (int: 1,2,3,4…)
 //   voltage           → "vlt"        (float, В)
 //   fuel_percent      → "fuel_pct"   (float, %)

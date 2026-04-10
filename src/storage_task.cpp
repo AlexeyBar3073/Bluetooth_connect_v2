@@ -3,7 +3,7 @@
 // Хранение данных в NVS (Preferences).
 //
 // Назначение:
-// - При старте: загрузка TripPack и SettingsPack из NVS → publish в DataBus
+// - При старте: загрузка TripPack и SettingsPack из NVS → publish в DataRouter
 // - В работе: подписка на TripPack и SettingsPack → сохранение в NVS
 // - Бинарное хранение (putBytes/getBytes)
 //

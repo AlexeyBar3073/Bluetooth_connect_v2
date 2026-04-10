@@ -57,8 +57,7 @@ static int lastMsgId = 0;
 // --- Кэш телеметрии (обновляется из очередей пакетов) ---
 static struct {
     // EnginePack
-    float   speed = 0, rpm = 0, inst_fuel = 0;
-    float   distance = 0, fuel_used = 0;
+    float   speed = 0, rpm = 0, voltage = 0, inst_fuel = 0;
     float   fuel_level = 0;
     bool    eng = false, hl = false;
 
@@ -67,12 +66,12 @@ static struct {
     float   trip_a = 0, fuel_a = 0, trip_b = 0, fuel_b = 0;
     float   trip_cur = 0, fuel_cur = 0, fuel = 0, avg = 0, avg_total = 0;
 
-    // KlinePack
+    // KlinePack (AKPP + диагностика)
     float   t_cool = 0, t_atf = 0;
-    float   voltage = 0, fuel_pct = 0, out_shaft = 0;
+    float   voltage_kl = 0, fuel_pct = 0, out_shaft = 0;
     bool    tcc = false;
     uint8_t selector = 3;    // D
-    uint8_t gear = 2;
+    uint8_t gear = 0;
     char    dtc[64] = "";
 
     // ClimatePack
@@ -96,11 +95,10 @@ static void processEnginePack(QueueHandle_t q) {
     if (xQueueReceive(q, &p, 0) == pdTRUE) {
         tel.speed = p.speed;
         tel.rpm = p.rpm;
+        tel.voltage = p.voltage;
         tel.eng = p.engine_running;
         tel.hl = p.parking_lights;
         tel.inst_fuel = p.instant_fuel;
-        tel.distance = p.distance;
-        tel.fuel_used = p.fuel_used;
         tel.fuel_level = p.fuel_level_sensor;
     }
 }
@@ -132,7 +130,7 @@ static void processKlinePack(QueueHandle_t q) {
     if (xQueueReceive(q, &p, 0) == pdTRUE) {
         tel.t_cool = p.coolant_temp;
         tel.t_atf = p.atf_temp;
-        tel.voltage = p.voltage;
+        tel.voltage_kl = p.voltage;
         tel.fuel_pct = p.fuel_percent;
         tel.out_shaft = p.output_shaft_rpm;
         tel.tcc = p.tcc_lockup;
@@ -362,15 +360,13 @@ static void buildFastJson(JsonDocument& doc) {
     t["vlt"] = roundf(tel.voltage * 10) / 10;
     t["eng"] = (int)tel.eng;
     t["hl"] = (int)tel.hl;
-
-    // Формируем sel из KlinePack: 0=P,1=R,2=N,3=D,4=3,5=2,6=L
     const char* selStr[] = {"P", "R", "N", "D", "3", "2", "L"};
-    const char* sel = (tel.selector <= 6) ? selStr[tel.selector] : "D";
+    const char* base = (tel.selector <= 6) ? selStr[tel.selector] : "D";
     char selBuf[8];
     if (tel.gear > 0 && tel.selector == 3) {
-        snprintf(selBuf, sizeof(selBuf), "%s%d", sel, tel.gear);
+        snprintf(selBuf, sizeof(selBuf), "%s%d", base, tel.gear);
     } else {
-        snprintf(selBuf, sizeof(selBuf), "%s", sel);
+        snprintf(selBuf, sizeof(selBuf), "%s", base);
     }
     t["sel"] = selBuf;
     t["tcc"] = (int)tel.tcc;
