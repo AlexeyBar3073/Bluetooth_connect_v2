@@ -1,17 +1,11 @@
 // -----------------------------------------------------------------------------
-// oled_task.cpp
-// Вывод на OLED SSD1306 128x64 (I2C).
-//
-// Назначение:
-// - Подписка на EnginePack (OVERWRITE) → скорость, RPM, статус двигателя
-// - Подписка на TripPack (OVERWRITE) → топливо, расход
-// - Подписка на TOPIC_TRANSPORT_STATUS → статус Bluetooth
-// - Обновление дисплея каждые 200 мс
-//
-// ВЕРСИЯ: 5.0.0 — MAJOR: Queue-архитектура
-// -----------------------------------------------------------------------------
+// oled_task.cpp — OLED SSD1306 128x64 (I2C)
+// Обёрнуто в OLED_ENABLED: при сборке без дисплея код исключается.
 
 #include "oled_task.h"
+
+#if OLED_ENABLED
+
 #include "data_router.h"
 #include "topics.h"
 #include "packets.h"
@@ -190,5 +184,7 @@ void oledStop() {
 }
 
 bool oledIsRunning() { return isRunning; }
+
+#endif // OLED_ENABLED
 
 

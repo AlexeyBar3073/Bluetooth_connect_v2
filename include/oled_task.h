@@ -16,30 +16,16 @@
 #ifndef OLED_TASK_H
 #define OLED_TASK_H
 
+#if OLED_ENABLED
+
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// =============================================================================
-// Публичный API
-// =============================================================================
-
-// oledTask: FreeRTOS задача вывода на OLED дисплей.
-// Подписывается на топики DataBus, обновляет экран каждые 200 мс.
-void oledTask(void* parameter);
-
-// oledStart: Запускает задачу OLED.
-// Инициализирует I2C и дисплей, показывает приветственный экран.
 void oledStart();
-
-// oledStop: Останавливает задачу OLED.
 void oledStop();
-
-// oledIsRunning: Возвращает true если задача активна.
 bool oledIsRunning();
 
-// oledUpdate: Обновляет содержимое дисплея.
-// Вызывается из задачи каждые 200 мс. Рисует 4 строки телеметрии + BT значок.
-// Примечание: Функция internal (static в oled_task.cpp), не вызывается извне.
+#endif // OLED_ENABLED
 
 #endif // OLED_TASK_H

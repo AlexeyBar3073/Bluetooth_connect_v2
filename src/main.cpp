@@ -22,17 +22,21 @@ extern void simulatorStart();     extern void simulatorStop();     extern bool s
 extern void storageStart();       extern void storageStop();       extern bool storageIsRunning();
 extern void calculatorStart();    extern void calculatorStop();    extern bool calculatorIsRunning();
 extern void protocolStart();      extern void protocolStop();      extern bool protocolIsRunning();
-extern void oledStart();          extern void oledStop();          extern bool oledIsRunning();
 extern void klineStart();         extern void klineStop();         extern bool klineIsRunning();
 extern void climateStart();       extern void climateStop();       extern bool climateIsRunning();
+#if OLED_ENABLED
+extern void oledStart();          extern void oledStop();          extern bool oledIsRunning();
+#endif
 
 static void restartSimulator()   { simulatorStop();  delay(100); simulatorStart(); }
 static void restartStorage()     { storageStop();    delay(100); storageStart(); }
 static void restartCalculator()  { calculatorStop(); delay(100); calculatorStart(); }
 static void restartProtocol()    { protocolStop();   delay(100); protocolStart(); }
-static void restartDisplay()     { oledStop();       delay(100); oledStart(); }
 static void restartKline()       { klineStop();      delay(100); klineStart(); }
 static void restartClimate()     { climateStop();    delay(100); climateStart(); }
+#if OLED_ENABLED
+static void restartDisplay()     { oledStop();       delay(100); oledStart(); }
+#endif
 
 // =============================================================================
 // setup
@@ -89,10 +93,18 @@ void setup() {
     delay(100);
 
     // 9. OLED
+#if OLED_ENABLED
     Serial.println("[SETUP] 9/9: OLED...");
     oledStart();
+#else
+    Serial.println("[SETUP] 7/7: Complete (no OLED)");
+#endif
 
+#if OLED_ENABLED
     Serial.println("\n=== Setup Complete (Sim/Storage/Calc/Proto/BT/KLine/Climate/OLED) ===\n");
+#else
+    Serial.println("\n=== Setup Complete (Sim/Storage/Calc/Proto/BT/KLine/Climate) ===\n");
+#endif
 }
 
 // =============================================================================
@@ -134,10 +146,12 @@ void loop() {
             Serial.println("[LOOP] LOW: Climate crashed! Restarting...");
             restartClimate();
         }
+#if OLED_ENABLED
         if (!oledIsRunning()) {
             Serial.println("[LOOP] LOW: OLED crashed! Restarting...");
             restartDisplay();
         }
+#endif
     }
 
     vTaskDelay(50 / portTICK_PERIOD_MS);
