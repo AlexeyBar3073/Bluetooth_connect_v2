@@ -1,8 +1,8 @@
 # AGENTS.md — Правила работы с проектом Bluetooth_connect_v2
 
 > **Последнее обновление:** 2026-04-10
-> **Текущая версия:** 6.1.1 (build 1)
-> **Заметка:** FIX: txBuffer overflow в BT Transport
+> **Текущая версия:** 6.2.0 (build 0)
+> **Заметка:** MINOR: RealEngine (форсунка+геркон ISR) + INA226 (напряжение+топливо)
 
 ---
 
@@ -240,6 +240,7 @@ Android ──► SerialBT ──► BT Transport ──publish──► TOPIC_M
 
 | Версия | Дата | Описание |
 |--------|------|----------|
+| **6.2.0** | 2026-04-10 | **MINOR: RealEngine + INA226.** ISR форсунки (GPIO4, CHANGE) + геркон (GPIO13, RISING). INA226: бортсеть + поплавок-реостат. DEBUG_LOG, OLED_ENABLED, REAL_ENGINE_ENABLED — переключатели через platformio.ini. |
 | **6.1.1** | 2026-04-10 | FIX: txBuffer overflow — очередь BT Transport 512B, но локальный буфер был 256B → краш при `get_cfg`. |
 | **6.1.0** | 2026-04-10 | **MINOR: K-Line и Climate модули подключены.** K-Line переведён с DataBus на DataRouter (module-owned queue). Оба модуля запущены в main.cpp, heartbeat-мониторинг добавлен. |
 | **6.0.0** | 2026-04-09 | MAJOR: DataRouter — типизированные топики, очереди у модулей, без BusMessage. Экономия RAM ~10 КБ. |

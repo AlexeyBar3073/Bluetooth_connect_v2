@@ -25,7 +25,7 @@
 //   - Забывать обновлять AGENTS.md при изменении версии
 //   - Устанавливать MAJOR=0 для продакшн-версии
 //
-// ВЕРСИЯ: 6.1.1 — FIX: txBuffer overflow в BT Transport
+// ВЕРСИЯ: 6.2.0 — MINOR: RealEngine + INA226
 // -----------------------------------------------------------------------------
 
 #ifndef APP_CONFIG_H
@@ -42,10 +42,10 @@
 // BUILD (0) — Исправление ошибок
 //
 #define FW_VERSION_MAJOR 6
-#define FW_VERSION_MINOR 1
-#define FW_VERSION_BUILD 1
-#define FW_VERSION_STR   "6.1.1"
-#define FW_VERSION_NOTE  "Fix: txBuffer overflow in BT Transport"
+#define FW_VERSION_MINOR 2
+#define FW_VERSION_BUILD 0
+#define FW_VERSION_STR   "6.2.0"
+#define FW_VERSION_NOTE  "RealEngine: injector+shaft ISR, INA226 voltage+fuel"
 
 // =============================================================================
 // Аппаратные пины
