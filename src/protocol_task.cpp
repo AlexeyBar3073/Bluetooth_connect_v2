@@ -437,7 +437,7 @@ void protocolTask(void* parameter) {
     dr.subscribe(TOPIC_TRIP_PACK,     tripQ,     QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_KLINE_PACK,    klineQ,    QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_CLIMATE_PACK,  climateQ,  QueuePolicy::OVERWRITE);
-    dr.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE, true);
 
     // Подписка на входящие (OVERWRITE, depth=1 — всегда актуальное, повторная отправка при необходимости)
     QueueHandle_t incomingQ = xQueueCreate(1, 128);
