@@ -32,7 +32,9 @@ void btTransportTask(void* parameter) {
     txQueue = xQueueCreate(1, 512);  // 1 слот × 512 байт (полный JSON)
     dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::OVERWRITE);
 
+#if DEBUG_LOG
     Serial.println("[BT Transport] Task running (DataRouter-based)");
+#endif
 
     while (1) {
         lastHeartbeat = millis();
@@ -41,7 +43,9 @@ void btTransportTask(void* parameter) {
         if (isConnected != wasConnected) {
             wasConnected = isConnected;
             dr.publish(TOPIC_TRANSPORT_STATUS, isConnected);
+#if DEBUG_LOG
             Serial.printf("[BT Transport] %s\n", isConnected ? "CONNECTED" : "DISCONNECTED");
+#endif
         }
 
         if (SerialBT.available()) {
@@ -71,8 +75,10 @@ void btTransportTask(void* parameter) {
                     unsigned long now = millis();
                     if (now - lastCongestionLog > 5000) {
                         lastCongestionLog = now;
+#if DEBUG_LOG
                         Serial.printf("[BT TX] SPP congested! Android не читает (%zu/%zu sent)\n",
                                       sent, strlen(txBuffer));
+#endif
                     }
                 }
                 // --- Логирование ack_id ---
@@ -86,7 +92,9 @@ void btTransportTask(void* parameter) {
                         int currentAck = atoi(ackPtr);
                         if (currentAck != lastAckId) {
                             lastAckId = currentAck;
+#if DEBUG_LOG
                             Serial.printf("[BT TX] #%d ack_id=%d\n", txCount, lastAckId);
+#endif
                         }
                     }
                 }
@@ -106,15 +114,21 @@ void btTransportStart(const char* deviceName) {
     if (btTaskHandle) return;
 
     // Задержка перед инициализацией BT — обход бага ESP-IDF HCI HAL crash
+#if DEBUG_LOG
     Serial.printf("[BT Transport] Delaying init to avoid HCI crash...\n");
+#endif
     delay(500);
 
+#if DEBUG_LOG
     Serial.printf("[BT Transport] Initializing '%s'...\n", deviceName);
+#endif
     if (!SerialBT.begin(deviceName)) {
         Serial.println("[BT Transport] Init FAILED!");
         return;
     }
+#if DEBUG_LOG
     Serial.printf("[BT Transport] Started: '%s'\n", deviceName);
+#endif
 
     wasConnected = SerialBT.hasClient();
     DataRouter::getInstance().publish(TOPIC_TRANSPORT_STATUS, wasConnected);

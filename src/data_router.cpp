@@ -49,7 +49,9 @@ void DataRouter::begin() {
         _topicRouters[i].packetValid = false;
         _topicRouters[i].packetLen = 0;
     }
+#if DEBUG_LOG
     Serial.println("[DataRouter] Initialized (Typed topics, module-owned queues)");
+#endif
 }
 
 // =============================================================================
@@ -92,9 +94,11 @@ bool DataRouter::subscribe(Topic topic, QueueHandle_t queue, QueuePolicy policy,
 
     xSemaphoreGive(_mutex);
 
+#if DEBUG_LOG
     Serial.printf("[DataRouter] Subscribed: topic=%d, queue=%p, policy=%s, depth=%d, subs=%d, retain=%d\n",
                   topic, queue, policy == QueuePolicy::OVERWRITE ? "OVERWRITE" : "FIFO_DROP",
                   depth, tr.subCount, retain ? 1 : 0);
+#endif
 
     return true;
 }
@@ -283,6 +287,7 @@ uint32_t DataRouter::getDropCount(Topic topic) {
 // =============================================================================
 
 void DataRouter::printStats() {
+#if DEBUG_LOG
     Serial.println("=== DataRouter Stats ===");
     for (int t = 0; t < TOPIC_COUNT; t++) {
         TopicRouter& tr = _topicRouters[t];
@@ -295,4 +300,5 @@ void DataRouter::printStats() {
         }
     }
     Serial.println("========================");
+#endif
 }

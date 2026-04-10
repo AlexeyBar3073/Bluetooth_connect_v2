@@ -85,7 +85,9 @@ static void processEnginePack(QueueHandle_t q) {
             current_distance  = 0.0f;
             current_fuel_used = 0.0f;
             avg_cur = 0.0f;
+#if DEBUG_LOG
             Serial.println("[Calculator] Engine started, trip counters reset");
+#endif
         }
         if (!pack.engine_running && engineRunning) {
             // Двигатель заглушён — пересчитываем avg_total
@@ -94,7 +96,9 @@ static void processEnginePack(QueueHandle_t q) {
             } else {
                 avg_total = (avg_total + avg_cur) / 2.0f;
             }
+#if DEBUG_LOG
             Serial.printf("[Calculator] Engine stopped, avg_total=%.1f\n", avg_total);
+#endif
         }
         engineRunning = pack.engine_running;
         current_distance  = pack.distance;
@@ -137,14 +141,18 @@ static void processSettingsPack(QueueHandle_t q) {
     if (xQueueReceive(q, &pack, 0) == pdTRUE) {
         if (!storageInit) {
             storageInit = true;
+#if DEBUG_LOG
             Serial.printf("[Calculator] SettingsPack from storage: tank=%.1f\n", pack.tank_capacity);
+#endif
         }
         float oldTank = tank_capacity;
         tank_capacity = pack.tank_capacity;
         if (oldTank != tank_capacity && fuel_base > tank_capacity) {
             fuel_base = tank_capacity;
+#if DEBUG_LOG
             Serial.printf("[Calculator] Tank capacity changed: %.1f -> %.1f L, fuel_base corrected\n",
                           oldTank, tank_capacity);
+#endif
         }
     }
 }
@@ -155,7 +163,9 @@ static void processSettingsPack(QueueHandle_t q) {
 static void processCorrectOdo(QueueHandle_t q) {
     int newOdo;
     if (xQueueReceive(q, &newOdo, 0) == pdTRUE) {
+#if DEBUG_LOG
         Serial.printf("[Calculator] ODO corrected: %d km\n", newOdo);
+#endif
         odo_base = (double)newOdo;
     }
 }
@@ -170,13 +180,17 @@ static void processCommands(QueueHandle_t q) {
             case CMD_RESET_TRIP_A:
                 trip_a_base = -current_distance;
                 fuel_trip_a_base = -current_fuel_used;
+#if DEBUG_LOG
                 Serial.println("[Calculator] Trip A reset");
+#endif
                 break;
 
             case CMD_RESET_TRIP_B:
                 trip_b_base = -current_distance;
                 fuel_trip_b_base = -current_fuel_used;
+#if DEBUG_LOG
                 Serial.println("[Calculator] Trip B reset");
+#endif
                 break;
 
             case CMD_RESET_AVG:
@@ -218,7 +232,9 @@ void calculatorTask(void* parameter) {
     dr.subscribe(TOPIC_CORRECT_ODO,    correctOdoQ, QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_CMD,            cmdQ,        QueuePolicy::FIFO_DROP);
 
+#if DEBUG_LOG
     Serial.println("[Calculator] Task started (DataRouter-based)");
+#endif
 
     unsigned long lastPublish = 0;
     const unsigned long PUBLISH_INTERVAL = 1000;
@@ -274,7 +290,9 @@ void calculatorTask(void* parameter) {
 void calculatorStart() {
     if (!taskHandle) {
         xTaskCreatePinnedToCore(calculatorTask, "Calculator", 4096, NULL, 2, &taskHandle, 0);
+#if DEBUG_LOG
         Serial.println("[Calculator] Started");
+#endif
     }
 }
 
@@ -283,7 +301,9 @@ void calculatorStop() {
         vTaskDelete(taskHandle);
         taskHandle = NULL;
         isRunningFlag = false;
+#if DEBUG_LOG
         Serial.println("[Calculator] Stopped");
+#endif
     }
 }
 

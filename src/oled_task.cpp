@@ -130,7 +130,9 @@ void oledTask(void* parameter) {
         displayBtConnected = btState;
     }
 
+#if DEBUG_LOG
     Serial.println("[OLED] Ready (DataRouter-based)");
+#endif
 
     unsigned long lastUpdate = 0;
 
@@ -173,7 +175,9 @@ void oledTask(void* parameter) {
 void oledStart() {
     if (!oledTaskHandle) {
         xTaskCreatePinnedToCore(oledTask, "OLED", TASK_STACK_SIZE, NULL, 2, &oledTaskHandle, 0);
+#if DEBUG_LOG
         Serial.println("[OLED] Started (8K stack, P2)");
+#endif
     }
 }
 

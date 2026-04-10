@@ -135,7 +135,9 @@ static void processCommands(QueueHandle_t cmdQueue) {
             fuelBase = tankCapacity;
             currentFuelUsed = 0.0f;
             fuelLevelSensor = roundf(fuelBase * 10.0f) / 10.0f;
+#if DEBUG_LOG
             Serial.printf("[Simulator] Full tank: fuelBase = %.1f L\n", fuelBase);
+#endif
         }
     }
 }
@@ -180,8 +182,10 @@ void simulatorTask(void* parameter) {
         int avg = sum / 20;
         int spread = maxV - minV;
         pedalConnected = (spread < 200 && avg < 4000);
+#if DEBUG_LOG
         Serial.printf("[Simulator] Pedal ADC: avg=%d spread=%d %s\n",
                       avg, spread, pedalConnected ? "CONNECTED" : "DISCONNECTED (floating)");
+#endif
         if (!pedalConnected) {
             filteredRaw = 0.0f;
         } else {
@@ -199,7 +203,9 @@ void simulatorTask(void* parameter) {
     QueueHandle_t cfgQ = xQueueCreate(1, sizeof(SettingsPack));
     dr.subscribe(TOPIC_SETTINGS_PACK, cfgQ, QueuePolicy::OVERWRITE, true);  // retain
 
+#if DEBUG_LOG
     Serial.println("[Simulator] Task started (DataRouter-based)");
+#endif
 
     // Локальные переменные для обработки кнопок
     unsigned long enginePressStartTime = 0;
@@ -231,9 +237,13 @@ void simulatorTask(void* parameter) {
                 if (engineRunning) {
                     currentDistance  = 0.0f;
                     currentFuelUsed  = 0.0f;
+#if DEBUG_LOG
                     Serial.println("[Simulator] Engine STARTED");
+#endif
                 } else {
+#if DEBUG_LOG
                     Serial.println("[Simulator] Engine STOPPED");
+#endif
                 }
                 isHandlingEnginePress = false;
             }
@@ -253,7 +263,9 @@ void simulatorTask(void* parameter) {
                 unsigned long duration = now - lightsPressStartTime;
                 if (duration >= LIGHTS_DEBOUNCE_MS) {
                     parkingLights = !parkingLights;
+#if DEBUG_LOG
                     Serial.printf("[Simulator] Parking lights: %s\n", parkingLights ? "ON" : "OFF");
+#endif
                 }
                 isHandlingLightsPress = false;
             }
@@ -339,7 +351,9 @@ void simulatorTask(void* parameter) {
                     fuelLoaded = true;
                     fuelBase = p.fuel_level;
                     fuelLevelSensor = fuelBase;
+#if DEBUG_LOG
                     Serial.printf("[Simulator] fuel_base from NVS: %.1f L\n", fuelBase);
+#endif
                 }
             }
         }
@@ -350,7 +364,9 @@ void simulatorTask(void* parameter) {
             if (xQueueReceive(cfgQ, &pack, 0) == pdTRUE) {
                 if (!storageInit) {
                     storageInit = true;
+#if DEBUG_LOG
                     Serial.printf("[Simulator] SettingsPack from storage: tank=%.1f\n", pack.tank_capacity);
+#endif
                 }
                 tankCapacity = pack.tank_capacity;
             }
@@ -371,7 +387,9 @@ void simulatorStart() {
             TASK_PRIORITY_SIMULATOR, &simulatorTaskHandle, 0
         );
         isRunning = true;
+#if DEBUG_LOG
         Serial.println("[Simulator] Started");
+#endif
     }
 }
 
@@ -380,7 +398,9 @@ void simulatorStop() {
         vTaskDelete(simulatorTaskHandle);
         simulatorTaskHandle = NULL;
         isRunning = false;
+#if DEBUG_LOG
         Serial.println("[Simulator] Stopped");
+#endif
     }
 }
 

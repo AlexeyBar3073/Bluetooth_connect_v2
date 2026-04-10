@@ -73,26 +73,36 @@ static void processCommands() {
     while (xQueueReceive(cmdQueue, &cmd, 0) == pdTRUE) {
         switch ((Command)cmd) {
             case CMD_KL_GET_DTC:
+#if DEBUG_LOG
                 Serial.println("[KLine] DTC request received (will update KlinePack)");
+#endif
                 break;
 
             case CMD_KL_CLEAR_DTC:
                 testDtcCount = 0;
                 memset(testDtcCodes, 0, sizeof(testDtcCodes));
+#if DEBUG_LOG
                 Serial.println("[KLine] DTC cleared");
+#endif
                 break;
 
             case CMD_KL_RESET_ADAPT:
+#if DEBUG_LOG
                 Serial.println("[KLine] TCM adaptation reset requested");
+#endif
                 break;
 
             case CMD_KL_PUMP_ATF:
+#if DEBUG_LOG
                 Serial.println("[KLine] ATF pump requested");
+#endif
                 break;
 
             case CMD_KL_DETECT_PROTO:
                 currentProtocol = 1;
+#if DEBUG_LOG
                 Serial.println("[KLine] Protocol detection requested");
+#endif
                 break;
 
             default:
@@ -122,7 +132,9 @@ void klineTask(void* parameter) {
     // Подписка на команды (FIFO_DROP — не терять команды)
     router.subscribe(TOPIC_CMD, cmdQueue, QueuePolicy::FIFO_DROP);
 
+#if DEBUG_LOG
     Serial.println("[KLine] Task started (DataRouter, simulation mode)");
+#endif
 
     unsigned long lastPublish = 0;
 
@@ -166,7 +178,9 @@ void klineTask(void* parameter) {
 void klineStart() {
     if (!taskHandle) {
         xTaskCreatePinnedToCore(klineTask, "KLine", TASK_STACK_SIZE, NULL, TASK_PRIORITY_KLINE, &taskHandle, 0);
+#if DEBUG_LOG
         Serial.println("[KLine] Started (P1)");
+#endif
     }
 }
 
@@ -179,7 +193,9 @@ void klineStop() {
             vQueueDelete(cmdQueue);
             cmdQueue = NULL;
         }
+#if DEBUG_LOG
         Serial.println("[KLine] Stopped");
+#endif
     }
 }
 

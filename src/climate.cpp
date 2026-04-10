@@ -55,7 +55,9 @@ void climateTask(void* parameter) {
     isRunningFlag = true;
     DataRouter& router = DataRouter::getInstance();
 
+#if DEBUG_LOG
     Serial.println("[Climate] Task started (DataRouter, Simulation mode)");
+#endif
 
     unsigned long lastPublish = 0;
 
@@ -85,7 +87,9 @@ void climateTask(void* parameter) {
 void climateStart() {
     if (!taskHandle) {
         xTaskCreatePinnedToCore(climateTask, "Climate", TASK_STACK_CLIMATE, NULL, TASK_PRIORITY_CLIMATE, &taskHandle, 0);
+#if DEBUG_LOG
         Serial.println("[Climate] Started (DataRouter)");
+#endif
     }
 }
 
@@ -94,7 +98,9 @@ void climateStop() {
         vTaskDelete(taskHandle);
         taskHandle = NULL;
         isRunningFlag = false;
+#if DEBUG_LOG
         Serial.println("[Climate] Stopped");
+#endif
     }
 }
 

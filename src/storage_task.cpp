@@ -87,11 +87,15 @@ static bool loadAndPublish() {
     if (len != sizeof(TripPack) || tripPack.version < 1 || tripPack.version > 2) {
         tripPack.version = 2;
         tripPack.fuel_level = 60.0f;
+#if DEBUG_LOG
         Serial.println("[Storage] TripPack: defaults");
+#endif
     } else {
+#if DEBUG_LOG
         Serial.println("[Storage] TripPack: loaded");
         Serial.printf("[Storage]   ODO=%.0f, tripA=%.1f, tripB=%.1f, fuel=%.1f, avg_total=%.1f\n",
                       tripPack.odo, tripPack.trip_a, tripPack.trip_b, tripPack.fuel_level, tripPack.avg_total);
+#endif
     }
     savedTrip = tripPack;
     tripValid = true;
@@ -107,9 +111,13 @@ static bool loadAndPublish() {
         settingsPack.injector_flow = 250.0f;
         settingsPack.pulses_per_meter = 3.0f;
         settingsPack.kline_protocol = 0;
+#if DEBUG_LOG
         Serial.println("[Storage] SettingsPack: defaults");
+#endif
     } else {
+#if DEBUG_LOG
         Serial.println("[Storage] SettingsPack: loaded");
+#endif
     }
     savedSettings = settingsPack;
     settingsValid = true;
@@ -119,7 +127,9 @@ static bool loadAndPublish() {
     // --- Публикация начальных данных через DataRouter (кэш будет установлен) ---
     dr.publishPacket(TOPIC_TRIP_PACK, &tripPack, sizeof(tripPack));
     dr.publishPacket(TOPIC_SETTINGS_PACK, &settingsPack, sizeof(settingsPack));
+#if DEBUG_LOG
     Serial.println("[Storage] Initial data published (DataRouter)");
+#endif
 
     return true;
 }
@@ -140,7 +150,9 @@ void storageTask(void* parameter) {
     dr.subscribe(TOPIC_TRIP_PACK,     tripQ,     QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE);
 
+#if DEBUG_LOG
     Serial.println("[Storage] Task running (DataRouter, Binary NVS)");
+#endif
 
     while (1) {
         lastHeartbeat = millis();
@@ -157,7 +169,9 @@ void storageTask(void* parameter) {
                     prefs.begin(NS, false);
                     prefs.putBytes(KEY_TRIP, &p, sizeof(TripPack));
                     prefs.end();
+#if DEBUG_LOG
                     Serial.printf("[Storage] TripPack saved: ODO=%.0f\n", p.odo);
+#endif
                 }
             }
         }
@@ -173,7 +187,9 @@ void storageTask(void* parameter) {
                     prefs.begin(NS, false);
                     prefs.putBytes(KEY_SETTINGS, &sp, sizeof(SettingsPack));
                     prefs.end();
+#if DEBUG_LOG
                     Serial.println("[Storage] SettingsPack saved");
+#endif
                 }
             }
         }
@@ -188,7 +204,9 @@ void storageStart() {
         loadAndPublish();
         // Потом запускаем задачу сохранения
         xTaskCreatePinnedToCore(storageTask, "Storage", 4096, NULL, 1, &taskHandle, 0);
+#if DEBUG_LOG
         Serial.println("[Storage] Started");
+#endif
     }
 }
 
@@ -197,7 +215,9 @@ void storageStop() {
         vTaskDelete(taskHandle);
         taskHandle = NULL;
         isRunningFlag = false;
+#if DEBUG_LOG
         Serial.println("[Storage] Stopped");
+#endif
     }
 }
 

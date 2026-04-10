@@ -213,7 +213,9 @@ static void publishOutgoing(JsonDocument& doc) {
 static void processIncoming(QueueHandle_t q) {
     char rxBuffer[256];
     while (xQueueReceive(q, rxBuffer, 0) == pdTRUE) {
+#if DEBUG_LOG
         Serial.printf("[Protocol] RX JSON: %s\n", rxBuffer);
+#endif
 
         JsonDocument doc;
         if (deserializeJson(doc, rxBuffer)) {
@@ -236,7 +238,9 @@ static void processIncoming(QueueHandle_t q) {
             lastMsgId = msgIdVar.as<int>();
         }
 
+#if DEBUG_LOG
         Serial.printf("[Protocol] Command='%s', msg_id=%d\n", cmd, lastMsgId);
+#endif
 
         // --- get_cfg: ответ из локального кэша настроек ---
         if (strcmp(cmd, "get_cfg") == 0) {
@@ -287,7 +291,9 @@ static void processIncoming(QueueHandle_t q) {
             publishOutgoing(resp);
 
             isStreamingActive = true;
+#if DEBUG_LOG
             Serial.println("[Protocol] Streaming STARTED");
+#endif
             continue;
         }
         else if (strcmp(cmd, "stop_telemetry") == 0) {
@@ -296,7 +302,9 @@ static void processIncoming(QueueHandle_t q) {
             publishOutgoing(resp);
 
             isStreamingActive = false;
+#if DEBUG_LOG
             Serial.println("[Protocol] Streaming STOPPED");
+#endif
             continue;
         }
 
@@ -322,7 +330,9 @@ static void processIncoming(QueueHandle_t q) {
                 odo_value = doc["data"]["value"].as<int>();
             }
             DataRouter::getInstance().publish(TOPIC_CORRECT_ODO, odo_value);
+#if DEBUG_LOG
             Serial.printf("[Protocol] correct_odo: %d km\n", odo_value);
+#endif
             // ACK подмешается в ближайшее исходящее
             continue;
         }
@@ -433,7 +443,9 @@ void protocolTask(void* parameter) {
     QueueHandle_t incomingQ = xQueueCreate(1, 128);
     dr.subscribe(TOPIC_MSG_INCOMING, incomingQ, QueuePolicy::OVERWRITE);
 
+#if DEBUG_LOG
     Serial.println("[Protocol] Task started (DataRouter, Fractional: FAST 100ms, TRIP 500ms, SERVICE 1000ms)");
+#endif
 
     unsigned long lastSend = 0;
     int counter = 0;
@@ -474,9 +486,11 @@ void protocolTask(void* parameter) {
 
             // Отладка: первые 3 сообщения и каждое 100-е — выводим полный JSON
             static int logCount = 0;
+#if DEBUG_LOG
             if (++logCount <= 3 || logCount % 100 == 0) {
                 Serial.printf("[Protocol] >>> TX #%d counter=%d, len=%zu, json=%s", logCount, counter, strlen(outBuffer), outBuffer);
             }
+#endif
         }
 
         vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -490,7 +504,9 @@ void protocolTask(void* parameter) {
 void protocolStart() {
     if (!taskHandle) {
         xTaskCreatePinnedToCore(protocolTask, "Protocol", TASK_STACK_PROTOCOL, NULL, 3, &taskHandle, 1);
+#if DEBUG_LOG
         Serial.println("[Protocol] Started");
+#endif
     }
 }
 
@@ -499,7 +515,9 @@ void protocolStop() {
         vTaskDelete(taskHandle);
         taskHandle = NULL;
         isRunningFlag = false;
+#if DEBUG_LOG
         Serial.println("[Protocol] Stopped");
+#endif
     }
 }
 
