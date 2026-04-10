@@ -16,13 +16,14 @@
 //   - Формировать JSON или публиковать в TOPIC_MSG_OUTGOING
 //   - Оперировать msg_id / ack_id
 //
-// ВЕРСИЯ: 5.1.0 — MAJOR: Публикация ClimatePack (не ServicePack)
+// ВЕРСИЯ: 6.1.0 — Climate на DataRouter (typed topics, module-owned queues)
 // -----------------------------------------------------------------------------
 
 #include "climate.h"
-#include "data_bus.h"
+#include "data_router.h"
 #include "topics.h"
 #include "packets.h"
+#include "app_config.h"
 
 static TaskHandle_t  taskHandle     = NULL;
 static bool          isRunningFlag  = false;
@@ -52,9 +53,9 @@ static void updateTestData() {
 void climateTask(void* parameter) {
     (void)parameter;
     isRunningFlag = true;
-    DataBus& db = DataBus::getInstance();
+    DataRouter& router = DataRouter::getInstance();
 
-    Serial.println("[Climate] Task started (Simulation mode)");
+    Serial.println("[Climate] Task started (DataRouter, Simulation mode)");
 
     unsigned long lastPublish = 0;
 
@@ -74,7 +75,7 @@ void climateTask(void* parameter) {
             pack.tire_pressure = testTire;
             pack.washer_level = testWash;
 
-            db.publishPacket(TOPIC_CLIMATE_PACK, &pack, sizeof(pack));
+            router.publishPacket(TOPIC_CLIMATE_PACK, &pack, sizeof(pack));
         }
 
         vTaskDelay(100 / portTICK_PERIOD_MS);
@@ -83,8 +84,8 @@ void climateTask(void* parameter) {
 
 void climateStart() {
     if (!taskHandle) {
-        xTaskCreatePinnedToCore(climateTask, "Climate", 2048, NULL, 1, &taskHandle, 0);
-        Serial.println("[Climate] Started");
+        xTaskCreatePinnedToCore(climateTask, "Climate", TASK_STACK_CLIMATE, NULL, TASK_PRIORITY_CLIMATE, &taskHandle, 0);
+        Serial.println("[Climate] Started (DataRouter)");
     }
 }
 
