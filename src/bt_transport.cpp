@@ -60,13 +60,10 @@ void btTransportTask(void* parameter) {
 
         // --- TX: DataRouter → SerialBT ---
         if (SerialBT.hasClient()) {
-            char txBuffer[256];
+            char txBuffer[512];
             if (txQueue && xQueueReceive(txQueue, txBuffer, pdMS_TO_TICKS(50)) == pdTRUE) {
-                // txBuffer содержит строку JSON (null-terminated, но может быть не полный)
-                // DataRouter.publishString копирует strlen() байт, так что нужно аккуратно
-                // На самом деле очередь создаётся с размером элемента 256,
-                // но строка может быть короче. xQueueReceive копирует весь элемент.
-                // Нужно использовать только до первого '\0'.
+                // txBuffer содержит строку JSON (null-terminated)
+                // DataRouter.publishString копирует strlen() байт
                 
                 size_t sent = SerialBT.print(txBuffer);
                 if (sent == 0) {
