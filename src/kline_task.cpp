@@ -140,10 +140,16 @@ void klineTask(void* parameter) {
 
             KlinePack pack;
             memset(&pack, 0, sizeof(pack));
-            pack.version      = 1;
-            pack.coolant_temp = testCoolant;
-            pack.atf_temp     = testAtf;
-            pack.dtc_count    = (uint8_t)testDtcCount;
+            pack.version           = 2;
+            pack.coolant_temp      = testCoolant;
+            pack.atf_temp          = testAtf;
+            pack.tcc_lockup        = false;
+            pack.selector_position = 3;    // D
+            pack.current_gear      = 2;    // 2-я передача
+            pack.voltage           = 14.0f + (random(0, 50) / 100.0f);
+            pack.fuel_percent      = 55.0f + (random(0, 20) / 10.0f);
+            pack.output_shaft_rpm  = 1500.0f + (random(0, 500));
+            pack.dtc_count         = (uint8_t)testDtcCount;
             strlcpy(pack.dtc_codes, testDtcCodes, sizeof(pack.dtc_codes));
 
             router.publishPacket(TOPIC_KLINE_PACK, &pack, sizeof(pack));

@@ -57,10 +57,10 @@ static int lastMsgId = 0;
 // --- Кэш телеметрии (обновляется из очередей пакетов) ---
 static struct {
     // EnginePack
-    float   speed = 0, rpm = 0, voltage = 0, inst_fuel = 0;
-    bool    eng = false, hl = false, tcc = false;
-    int8_t  gear = 0;
-    char    sel[8] = "D";
+    float   speed = 0, rpm = 0, inst_fuel = 0;
+    float   distance = 0, fuel_used = 0;
+    float   fuel_level = 0;
+    bool    eng = false, hl = false;
 
     // TripPack
     double  odo = 0;
@@ -69,6 +69,10 @@ static struct {
 
     // KlinePack
     float   t_cool = 0, t_atf = 0;
+    float   voltage = 0, fuel_pct = 0, out_shaft = 0;
+    bool    tcc = false;
+    uint8_t selector = 3;    // D
+    uint8_t gear = 2;
     char    dtc[64] = "";
 
     // ClimatePack
@@ -92,19 +96,12 @@ static void processEnginePack(QueueHandle_t q) {
     if (xQueueReceive(q, &p, 0) == pdTRUE) {
         tel.speed = p.speed;
         tel.rpm = p.rpm;
-        tel.voltage = p.voltage;
         tel.eng = p.engine_running;
         tel.hl = p.parking_lights;
         tel.inst_fuel = p.instant_fuel;
-        tel.gear = p.gear;
-        tel.tcc = p.tcc_lockup;
-
-        // Формируем sel: R/N/P/2/L как есть, D + gear
-        if (p.gear > 0 && strcmp(p.selector_pos, "D") == 0) {
-            snprintf(tel.sel, sizeof(tel.sel), "D%d", p.gear);
-        } else {
-            strlcpy(tel.sel, p.selector_pos, sizeof(tel.sel));
-        }
+        tel.distance = p.distance;
+        tel.fuel_used = p.fuel_used;
+        tel.fuel_level = p.fuel_level_sensor;
     }
 }
 
@@ -135,6 +132,12 @@ static void processKlinePack(QueueHandle_t q) {
     if (xQueueReceive(q, &p, 0) == pdTRUE) {
         tel.t_cool = p.coolant_temp;
         tel.t_atf = p.atf_temp;
+        tel.voltage = p.voltage;
+        tel.fuel_pct = p.fuel_percent;
+        tel.out_shaft = p.output_shaft_rpm;
+        tel.tcc = p.tcc_lockup;
+        tel.selector = p.selector_position;
+        tel.gear = p.current_gear;
         strlcpy(tel.dtc, p.dtc_codes, sizeof(tel.dtc));
     }
 }
@@ -354,13 +357,24 @@ static void processIncoming(QueueHandle_t q) {
 
 static void buildFastJson(JsonDocument& doc) {
     JsonObject t = doc["tel"].to<JsonObject>();
-    t["spd"] = (int)tel.speed; t["rpm"] = (int)tel.rpm;
-    t["vlt"] = roundf(tel.voltage * 10) / 10; t["eng"] = (int)tel.eng;
-    t["hl"] = (int)tel.hl; t["sel"] = tel.sel; t["tcc"] = (int)tel.tcc;
+    t["spd"] = (int)tel.speed;
+    t["rpm"] = (int)tel.rpm;
+    t["vlt"] = roundf(tel.voltage * 10) / 10;
+    t["eng"] = (int)tel.eng;
+    t["hl"] = (int)tel.hl;
 
-    // Если данных от Calculator еще нет (odo=0), покажем размер бака
-    float fuelToSend = (tel.odo == 0) ? cfg.tank : roundf(tel.fuel * 10) / 10;
-    t["fuel"] = fuelToSend;
+    // Формируем sel из KlinePack: 0=P,1=R,2=N,3=D,4=3,5=2,6=L
+    const char* selStr[] = {"P", "R", "N", "D", "3", "2", "L"};
+    const char* sel = (tel.selector <= 6) ? selStr[tel.selector] : "D";
+    char selBuf[8];
+    if (tel.gear > 0 && tel.selector == 3) {
+        snprintf(selBuf, sizeof(selBuf), "%s%d", sel, tel.gear);
+    } else {
+        snprintf(selBuf, sizeof(selBuf), "%s", sel);
+    }
+    t["sel"] = selBuf;
+    t["tcc"] = (int)tel.tcc;
+    t["fuel"] = roundf(tel.fuel_level * 10) / 10;
 }
 
 // =============================================================================
@@ -374,10 +388,8 @@ static void addTripFields(JsonDocument& doc) {
     t["fuel_a"] = roundf(tel.fuel_a * 10) / 10;
     t["trip_b"] = roundf(tel.trip_b * 10) / 10;
     t["fuel_b"] = roundf(tel.fuel_b * 10) / 10;
-    float fuelToSend = (tel.odo == 0) ? cfg.tank : roundf(tel.fuel * 10) / 10;
     t["trip_cur"] = roundf(tel.trip_cur * 10) / 10;
     t["fuel_cur"] = roundf(tel.fuel_cur * 10) / 10;
-    t["fuel"] = fuelToSend;
     t["inst"] = roundf(tel.inst_fuel * 10) / 10;
     t["avg_cur"] = roundf(tel.avg * 10) / 10;
     float avgToDisplay = (tel.avg_total > 0.0f) ? tel.avg_total : tel.avg;

@@ -118,10 +118,12 @@ void oledTask(void* parameter) {
 
     QueueHandle_t engineQ = xQueueCreate(1, sizeof(EnginePack));
     QueueHandle_t tripQ   = xQueueCreate(1, sizeof(TripPack));
+    QueueHandle_t klineQ  = xQueueCreate(1, sizeof(KlinePack));
     QueueHandle_t btQ     = xQueueCreate(1, sizeof(bool));
 
     dr.subscribe(TOPIC_ENGINE_PACK,    engineQ, QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_TRIP_PACK,      tripQ,   QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_KLINE_PACK,     klineQ,  QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_TRANSPORT_STATUS, btQ,   QueuePolicy::OVERWRITE, true);  // retain
 
     // Начальный BT статус из кэша
@@ -142,9 +144,14 @@ void oledTask(void* parameter) {
         if (engineQ && xQueueReceive(engineQ, &pEng, 0) == pdTRUE) {
             displaySpeed = pEng.speed;
             displayRpm = pEng.rpm;
-            displayVoltage = pEng.voltage;
             displayEngine = pEng.engine_running;
             displayParkingLights = pEng.parking_lights;
+        }
+
+        // Чтение KlinePack (напряжение)
+        KlinePack pKline;
+        if (klineQ && xQueueReceive(klineQ, &pKline, 0) == pdTRUE) {
+            displayVoltage = pKline.voltage;
         }
 
         // Чтение TripPack

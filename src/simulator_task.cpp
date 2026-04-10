@@ -312,10 +312,9 @@ void simulatorTask(void* parameter) {
 
             EnginePack pack;
             memset(&pack, 0, sizeof(pack));
-            pack.version           = 1;
+            pack.version           = 3;
             pack.speed             = currentSpeed;
             pack.rpm               = roundf(currentRpm / 10.0f) * 10.0f;
-            pack.voltage           = getVoltage();
             pack.engine_running    = engineRunning;
             pack.parking_lights    = parkingLights;
             pack.instant_fuel      = getInstantFuel();
@@ -323,9 +322,6 @@ void simulatorTask(void* parameter) {
             pack.fuel_used         = currentFuelUsed;
             pack.fuel_level_sensor = fuelLevelSensor;
             pack.not_fuel          = true;
-            pack.gear              = 0;
-            strcpy(pack.selector_pos, "D");
-            pack.tcc_lockup        = false;
 
             dr.publishPacket(TOPIC_ENGINE_PACK, &pack, sizeof(pack));
         }

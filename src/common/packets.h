@@ -68,35 +68,32 @@
 //   - Calculator Task (расчёт TripPack)
 //
 // Периодичность: 100 мс (10 Гц)
-// Размер: 26 байт
+// Размер: 35 байт (v3)
 //
 // Маппинг полей в JSON (Protocol Task):
 //   speed     → "spd"        (int, км/ч)
 //   rpm       → "rpm"        (int, об/мин)
-//   voltage   → "vlt"        (float, В)
+//   instant_fuel → "inst"    (float, л/100км или л/ч)
+//   distance  → (внутреннее, не отправляется)
+//   fuel_used → (внутреннее, не отправляется)
+//   fuel_level_sensor → "fuel" (float, л)
 //   engine_running → "eng"   (bool)
 //   parking_lights → "hl"    (bool)
-//   instant_fuel → "inst"    (float, л/100км или л/ч)
-//   gear      → "gear"       (int)
-//   selector_pos → "sel"     (string)
-//   tcc_lockup → "tcc"       (bool)
+//
+// Поля gear, selector_pos, tcc_lockup, voltage — из KlinePack (добавляет Protocol)
 //
 #pragma pack(push, 1)
 typedef struct {
-    uint8_t  version;           // Версия пакета (текущая: 2)
+    uint8_t  version;           // Версия пакета (текущая: 3)
     float    speed;             // Скорость автомобиля (км/ч)
     float    rpm;               // Обороты двигателя (об/мин)
-    float    voltage;           // Напряжение бортсети (В)
-    bool     engine_running;    // Двигатель работает (true = запущен)
-    bool     parking_lights;    // Габаритные огни включены (true = вкл)
     float    instant_fuel;      // Мгновенный расход (л/100км при движении, л/ч на холостых)
     float    distance;          // Накопленный пробег за поездку (км, сбрасывается при запуске двигателя)
     float    fuel_used;         // Накопленный расход за поездку (л, сбрасывается при запуске двигателя)
     float    fuel_level_sensor; // Остаток топлива в баке (л, рассчитан EngineModule/Simulator, округлён до 0.1)
+    bool     engine_running;    // Двигатель работает (true = запущен)
+    bool     parking_lights;    // Габаритные огни включены (true = вкл)
     bool     not_fuel;          // true = датчик топлива отсутствует, расход считает Simulator
-    int8_t   gear;              // Текущая передача (-1 = задняя, 0 = нейтраль, 1..8 = передачи)
-    char     selector_pos[4];   // Позиция селектора АКПП ("P","R","N","D","3","2","L")
-    bool     tcc_lockup;        // Блокировка гидротрансформатора АКПП (true = заблокирован)
 } EnginePack;
 #pragma pack(pop)
 
@@ -153,29 +150,40 @@ typedef struct {
 // =============================================================================
 //
 // Назначение:
-//   Передача данных диагностики ЭБУ через K-Line: температуры, коды ошибок.
-//   Публикуется K-Line Task, читается Protocol для формирования SERVICE JSON.
+//   Данные диагностики ЭБУ через K-Line: температуры, АКПП, напряжение, топливо, DTC.
+//   Публикуется K-Line Task, читается Protocol (для FAST/SERVICE JSON) и Simulator (для кэша).
 //
 // Кто публикует:
 //   - K-Line Task (опрос ECM/TCM/ABS по ISO 9141-2, или режим симуляции)
 //
 // Кто подписан:
-//   - Protocol Task (сборка SERVICE JSON)
+//   - Protocol Task (FAST + SERVICE JSON)
 //
 // Периодичность: 1000 мс (1 Гц)
-// Размер: 74 байта
 //
 // Маппинг полей в JSON (Protocol Task):
-//   coolant_temp  → "t_cool"     (float, °C)
-//   atf_temp      → "t_atf"      (float, °C)
-//   dtc_count     → "dtc_cnt"    (int, шт)
-//   dtc_codes     → "dtc"        (string, через ";")
+//   coolant_temp      → "t_cool"     (float, °C)
+//   atf_temp          → "t_atf"      (float, °C)
+//   tcc_lockup        → "tcc"        (bool)
+//   selector_position → "sel"        (int: 0=P, 1=R, 2=N, 3=D, 4=3, 5=2, 6=L)
+//   current_gear      → "gear"       (int: 1,2,3,4…)
+//   voltage           → "vlt"        (float, В)
+//   fuel_percent      → "fuel_pct"   (float, %)
+//   output_shaft_rpm  → "out_shaft"  (int, об/мин)
+//   dtc_count         → "dtc_cnt"    (int, шт)
+//   dtc_codes         → "dtc"        (string, через ";")
 //
 #pragma pack(push, 1)
 typedef struct {
-    uint8_t  version;           // Версия пакета (текущая: 1)
+    uint8_t  version;           // Версия пакета (текущая: 2)
     float    coolant_temp;      // Температура охлаждающей жидкости (°C, от К-Line)
     float    atf_temp;          // Температура масла АКПП (°C, от К-Line)
+    bool     tcc_lockup;        // Блокировка гидротрансформатора АКПП (O/D OFF)
+    uint8_t  selector_position; // Позиция селектора АКПП (0=P, 1=R, 2=N, 3=D, 4=3, 5=2, 6=L)
+    uint8_t  current_gear;      // Текущая передача АКПП (1,2,3,4…; 0=нейтраль)
+    float    voltage;           // Напряжение бортсети (В, от ЭБУ)
+    float    fuel_percent;      // Уровень топлива (%)
+    float    output_shaft_rpm;  // Обороты выходного вала АКПП (об/мин)
     uint8_t  dtc_count;         // Количество кодов ошибок ЭБУ (шт)
     char     dtc_codes[64];     // Коды ошибок через точку с запятой (напр. "P0135;P0141")
 } KlinePack;
