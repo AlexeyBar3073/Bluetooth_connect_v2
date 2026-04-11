@@ -222,7 +222,43 @@ void storageStop() {
 }
 
 bool storageIsRunning() { return isRunningFlag && (millis() - lastHeartbeat) < 5000; }
-void storageForceSave() {}
+
+// =============================================================================
+// storageForceSave — Аварийное сохранение (вызывается при пропадании ACC)
+// =============================================================================
+//
+// Назначение: мгновенная запись в NVS при выключении зажигания,
+// пока ESP32 питается от конденсатора.
+//
+void storageForceSave() {
+#if DEBUG_LOG
+    Serial.println("[Storage] === EMERGENCY SAVE ===");
+#endif
+
+    // Сохраняем TripPack (без throttle!)
+    if (tripValid) {
+        prefs.begin(NS, false);
+        prefs.putBytes(KEY_TRIP, &savedTrip, sizeof(TripPack));
+        prefs.end();
+#if DEBUG_LOG
+        Serial.printf("[Storage] TripPack EMERGENCY saved: ODO=%.0f\n", savedTrip.odo);
+#endif
+    }
+
+    // Сохраняем SettingsPack (без throttle!)
+    if (settingsValid) {
+        prefs.begin(NS, false);
+        prefs.putBytes(KEY_SETTINGS, &savedSettings, sizeof(SettingsPack));
+        prefs.end();
+#if DEBUG_LOG
+        Serial.println("[Storage] SettingsPack EMERGENCY saved");
+#endif
+    }
+
+#if DEBUG_LOG
+    Serial.println("[Storage] === EMERGENCY SAVE COMPLETE ===");
+#endif
+}
 
 
 

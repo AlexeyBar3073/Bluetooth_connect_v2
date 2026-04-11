@@ -60,6 +60,7 @@ extern "C" {
 // =============================================================================
 
 #define DEAD_TIME_US         750     // Мёртвая зона форсунки (мкс) — калибровать
+#define DEAD_TIME_COEF       120.0f  // мкс/В (коррекция при просадке напряжения, Denso)
 #define MAX_INJECTOR_US    50000     // Макс. длительность впрыска (50 мс)
 #define RMT_FILTER_THRESH   50     // Фильтр шума < 50 мкс (аппаратный, RMT)
 #define PCNT_FILTER_VALUE  100     // Фильтр дребезга VSS (аппаратный, PCNT, мкс)
@@ -79,6 +80,24 @@ static volatile uint32_t injectorMissed  = 0;     // Пропущенные (> M
 
 static INA226 ina226(0x40);  // Адрес I2C (A0=GND, A1=GND)
 static bool   inaReady = false;
+static float  lastVoltage = 13.8f;  // Последнее измерение напряжения (для Dead Time)
+
+// =============================================================================
+// calcDeadTime — динамический расчёт мёртвой зоны форсунки
+// =============================================================================
+//
+// Denso форсунки: лаг увеличивается при просадке напряжения
+// Формула: deadTime = DEAD_TIME_US + (14.0 - voltage) × DEAD_TIME_COEF
+// Пример: 13.8В → 750 + 0.2×120 = 774 мкс
+//         12.0В → 750 + 2.0×120 = 990 мкс
+//
+static uint32_t calcDeadTime(float voltage) {
+    if (voltage < 10.0f) voltage = 10.0f;  // Защита от отрицательных
+    if (voltage > 15.0f) voltage = 15.0f;  // Защита от перенапряжения
+    float dt = DEAD_TIME_US + (14.0f - voltage) * DEAD_TIME_COEF;
+    dt = constrain(dt, 400.0f, 1500.0f);  // Физические пределы
+    return (uint32_t)dt;
+}
 
 // =============================================================================
 // Датчик уровня топлива — ADC (поплавок Toyota, 54+53 = 107 Ом)
@@ -212,7 +231,10 @@ static void initPCNT() {
 // =============================================================================
 // processRMTData — чтение данных из кольцевого буфера RMT
 // =============================================================================
-
+//
+// ВАЖНО: 64-битные операции НЕ атомарны на 32-битном ESP32.
+// Все изменения injectorTotalUs/injectorPulses защищены через portDISABLE_INTERRUPTS().
+//
 static void processRMTData() {
     RingbufHandle_t rb = NULL;
     rmt_get_ringbuf_handle(RMT_CHANNEL_0, &rb);
@@ -224,52 +246,56 @@ static void processRMTData() {
 
     uint32_t numItems = itemSize / sizeof(rmt_item32_t);
 
+    // Локальные накопители (атомарность не нужна, т.к. локальные переменные)
+    uint64_t localTotalUs = 0;
+    uint32_t localPulses = 0;
+    uint32_t localMissed = 0;
+
+    // Динамический Dead Time (обновляется каждые 100 мс из основного цикла)
+    uint32_t deadTime = calcDeadTime(lastVoltage);
+
     for (uint32_t i = 0; i < numItems; i++) {
         // 6N137 инвертирует: LOW (level=0) = форсунка открыта
         if (items[i].level0 == 0 && items[i].duration0 > 0) {
             uint32_t duration = items[i].duration0;  // в мкс
-            if (duration > DEAD_TIME_US && duration < MAX_INJECTOR_US) {
-                uint32_t corrected = duration - DEAD_TIME_US;
-                injectorTotalUs += corrected;
-                injectorPulses++;
-
-                // Накопление для калибровки форсунки
-                if (calInjectorActive) {
-                    calInjectorTotalUs += corrected;
-                    calInjectorPulses++;
-                }
-                // Накопление для калибровки dead time
-                if (calDeadTimeActive) {
-                    calDeadTimeTotalUs += corrected;
-                }
+            if (duration > deadTime && duration < MAX_INJECTOR_US) {
+                uint32_t corrected = duration - deadTime;
+                localTotalUs += corrected;
+                localPulses++;
             } else if (duration >= MAX_INJECTOR_US) {
-                injectorMissed++;
+                localMissed++;
             }
         }
 
         if (items[i].level1 == 0 && items[i].duration1 > 0) {
             uint32_t duration = items[i].duration1;
-            if (duration > DEAD_TIME_US && duration < MAX_INJECTOR_US) {
-                uint32_t corrected = duration - DEAD_TIME_US;
-                injectorTotalUs += corrected;
-                injectorPulses++;
-
-                // Накопление для калибровки форсунки
-                if (calInjectorActive) {
-                    calInjectorTotalUs += corrected;
-                    calInjectorPulses++;
-                }
-                // Накопление для калибровки dead time
-                if (calDeadTimeActive) {
-                    calDeadTimeTotalUs += corrected;
-                }
+            if (duration > deadTime && duration < MAX_INJECTOR_US) {
+                uint32_t corrected = duration - deadTime;
+                localTotalUs += corrected;
+                localPulses++;
             } else if (duration >= MAX_INJECTOR_US) {
-                injectorMissed++;
+                localMissed++;
             }
         }
     }
 
     vRingbufferReturnItem(rb, (void*)items);
+
+    // Атомарное обновление глобальных переменных (критично для 64-бит!)
+    portDISABLE_INTERRUPTS();
+    injectorTotalUs += localTotalUs;
+    injectorPulses += localPulses;
+    injectorMissed += localMissed;
+
+    // Калибровка — тоже атомарно
+    if (calInjectorActive) {
+        calInjectorTotalUs += localTotalUs;
+        calInjectorPulses += localPulses;
+    }
+    if (calDeadTimeActive) {
+        calDeadTimeTotalUs += localTotalUs;
+    }
+    portENABLE_INTERRUPTS();
 }
 
 // =============================================================================
@@ -606,8 +632,9 @@ static void realEngineTask(void* parameter) {
 
             bool engRunning = (pulses > 0);
 
-            // --- Напряжение от INA226 (бортсеть) ---
+            // --- Напряжение от INA226 (бортсеть) — обновляем для Dead Time ---
             float voltage = inaReady ? ina226.readBusVoltage() / 1000.0f : 12.7f;
+            lastVoltage = voltage;  // Используется в calcDeadTime()
 
             // --- Уровень топлива от ADC (поплавок Toyota) ---
             float fuelSensorPct = 0;
