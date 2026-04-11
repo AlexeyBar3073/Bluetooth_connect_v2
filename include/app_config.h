@@ -38,14 +38,14 @@
 // Формат: MAJOR.MINOR.BUILD
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
-// MINOR (3) — RMT + PCNT: аппаратные драйверы для форсунки и скорости
+// MINOR (4) — OTA обновление прошивки + восстановление архитектуры
 // BUILD (0) — Начальная версия
 //
 #define FW_VERSION_MAJOR 6
-#define FW_VERSION_MINOR 3
+#define FW_VERSION_MINOR 4
 #define FW_VERSION_BUILD 0
-#define FW_VERSION_STR   "6.3.0"
-#define FW_VERSION_NOTE  "RMT+PCNT: аппаратный сбор данных с форсунки и датчика скорости"
+#define FW_VERSION_STR   "6.4.0"
+#define FW_VERSION_NOTE  "OTA via BT + DataRouter arch fixed"
 
 // =============================================================================
 // Аппаратные пины
