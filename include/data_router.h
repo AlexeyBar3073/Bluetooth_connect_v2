@@ -72,7 +72,7 @@ enum class QueuePolicy : uint8_t {
 //   TOPIC_KLINE_PACK     → KlinePack*
 //   TOPIC_CLIMATE_PACK   → ClimatePack*
 //   TOPIC_SETTINGS_PACK  → SettingsPack*
-//   TOPIC_CMD            → CmdPayload (через publish/получение через CmdPayload)
+//   TOPIC_CMD            → uint8_t (enum Command, 1 байт)
 //   TOPIC_MSG_INCOMING   → char* (строка)
 //   TOPIC_MSG_OUTGOING   → char* (строка)
 //   TOPIC_TRANSPORT_STATUS → bool
@@ -85,18 +85,19 @@ enum class QueuePolicy : uint8_t {
 // Использование:
 //
 // 1. Модуль создаёт очередь:
-//    QueueHandle_t cmdQ = xQueueCreate(5, sizeof(CmdPayload));
+//    QueueHandle_t cmdQ = xQueueCreate(5, sizeof(uint8_t));
 //
 // 2. Подписка:
 //    DataRouter::getInstance().subscribe(TOPIC_CMD, cmdQ, QueuePolicy::FIFO_DROP);
 //
 // 3. Чтение:
-//    CmdPayload cmd;
-//    if (xQueueReceive(cmdQ, &cmd, pdMS_TO_TICKS(50)) == pdTRUE) { ... }
+//    uint8_t cmd;
+//    if (xQueueReceive(cmdQ, &cmd, pdMS_TO_TICKS(50)) == pdTRUE) {
+//        if ((Command)cmd == CMD_RESET_TRIP_A) { ... }
+//    }
 //
 // 4. Публикация:
-//    CmdPayload cmd = { CMD_RESET_TRIP_A, 0, 1 };
-//    DataRouter::getInstance().publish(TOPIC_CMD, cmd);
+//    DataRouter::getInstance().publish(TOPIC_CMD, CMD_RESET_TRIP_A);
 //
 
 class DataRouter {

@@ -86,7 +86,8 @@ void climateTask(void* parameter) {
 
 void climateStart() {
     if (!taskHandle) {
-        xTaskCreatePinnedToCore(climateTask, "Climate", TASK_STACK_CLIMATE, NULL, TASK_PRIORITY_CLIMATE, &taskHandle, 0);
+        // Ядро 1 — Climate (температура, сервис)
+        xTaskCreatePinnedToCore(climateTask, "Climate", TASK_STACK_CLIMATE, NULL, TASK_PRIORITY_CLIMATE, &taskHandle, 1);
 #if DEBUG_LOG
         Serial.println("[Climate] Started (DataRouter)");
 #endif

@@ -1,23 +1,82 @@
 // -----------------------------------------------------------------------------
 // bt_transport.cpp
-// Транспортный уровень Bluetooth Classic (SPP).
+// Транспортный уровень Bluetooth Classic (SPP) + OTA обновление прошивки.
+//
+// Режимы работы:
+//   1. Обычный — JSON команды, телеметрия
+//   2. OTA — приём прошивки чанками, запись в flash
+//
+// ВЕРСИЯ: 6.4.0 — OTA через Bluetooth Serial
 // -----------------------------------------------------------------------------
 
 #include "bt_transport.h"
 #include "data_router.h"
 #include "topics.h"
+#include "commands.h"
+#include "ota_handler.h"
 #include <BluetoothSerial.h>
 
-static BluetoothSerial SerialBT;
+BluetoothSerial SerialBT;  // Глобальный (не static) — используется в ota_handler.cpp
 
 static TaskHandle_t    btTaskHandle = NULL;
 static bool            wasConnected = false;
 static bool            isRunningFlag = false;
 static unsigned long   lastHeartbeat = 0;
+
+// --- Режим OTA ---
+static bool            otaMode = false;
 static char            rxBuffer[256];
+static uint8_t         otaBuffer[2048];  // Буфер для OTA данных
 
 // --- Очереди (создаются модулем, регистрируются в DataRouter) ---
 static QueueHandle_t   txQueue = NULL;       // Входящий JSON от Android → BT → шина
+static QueueHandle_t   cmdQueue = NULL;      // Команды из шины (OTA)
+
+// =============================================================================
+// processOTA — обработка OTA команд
+// =============================================================================
+
+static void processOTA() {
+    if (SerialBT.available()) {
+        size_t len = SerialBT.readBytes(otaBuffer, sizeof(otaBuffer));
+        otaHandle(otaBuffer, len);
+    }
+}
+
+// =============================================================================
+// enterOTAMode — войти в режим OTA
+// =============================================================================
+
+void enterOTAMode() {
+    if (otaMode) return;
+
+    Serial.println("[BT Transport] === ENTERING OTA MODE ===");
+    Serial.println("[BT Transport] Stopping non-critical tasks...");
+
+    // Остановить задачи, которые могут мешать OTA
+    // Protocol, Calculator, Simulator/RealEngine — останавливаем
+    extern void protocolStop();
+    extern void calculatorStop();
+    extern void simulatorStop();
+    extern void realEngineStop();
+    extern void klineStop();
+    extern void climateStop();
+
+    protocolStop();
+    calculatorStop();
+    simulatorStop();
+    realEngineStop();
+    klineStop();
+    climateStop();
+
+    otaMode = true;
+
+    // Ответ Android
+    SerialBT.write(OTA_RSP_READY);
+    SerialBT.println("\n[OTA] Ready to receive firmware");
+
+    Serial.println("[BT Transport] OTA MODE ACTIVE");
+}
 
 // =============================================================================
 // btTransportTask — Задача
@@ -32,13 +91,28 @@ void btTransportTask(void* parameter) {
     txQueue = xQueueCreate(1, 512);  // 1 слот × 512 байт (полный JSON)
     dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::OVERWRITE);
 
+    // Подписка на команды (OTA)
+    cmdQueue = xQueueCreate(5, sizeof(uint8_t));
+    dr.subscribe(TOPIC_CMD, cmdQueue, QueuePolicy::FIFO_DROP);
+
 #if DEBUG_LOG
-    Serial.println("[BT Transport] Task running (DataRouter-based)");
+    Serial.println("[BT Transport] Task running (DataRouter-based + OTA)");
 #endif
 
     while (1) {
         lastHeartbeat = millis();
 
+        // --- Проверка команд из шины (OTA) ---
+        if (cmdQueue) {
+            uint8_t cmd;
+            while (xQueueReceive(cmdQueue, &cmd, 0) == pdTRUE) {
+                if ((Command)cmd == CMD_ENTER_OTA_MODE) {
+                    enterOTAMode();
+                }
+            }
+        }
+
+        // --- Статус подключения ---
         bool isConnected = SerialBT.hasClient();
         if (isConnected != wasConnected) {
             wasConnected = isConnected;
@@ -48,6 +122,14 @@ void btTransportTask(void* parameter) {
 #endif
         }
 
+        // --- Режим OTA ---
+        if (otaMode) {
+            processOTA();
+            vTaskDelay(10 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        // --- Обычный режим: RX ---
         if (SerialBT.available()) {
             int len = SerialBT.readBytesUntil('\n', rxBuffer, sizeof(rxBuffer) - 1);
             rxBuffer[len] = '\0';
@@ -62,13 +144,10 @@ void btTransportTask(void* parameter) {
             }
         }
 
-        // --- TX: DataRouter → SerialBT ---
+        // --- Обычный режим: TX ---
         if (SerialBT.hasClient()) {
             char txBuffer[512];
             if (txQueue && xQueueReceive(txQueue, txBuffer, pdMS_TO_TICKS(50)) == pdTRUE) {
-                // txBuffer содержит строку JSON (null-terminated)
-                // DataRouter.publishString копирует strlen() байт
-                
                 size_t sent = SerialBT.print(txBuffer);
                 if (sent == 0) {
                     static unsigned long lastCongestionLog = 0;
@@ -133,6 +212,7 @@ void btTransportStart(const char* deviceName) {
     wasConnected = SerialBT.hasClient();
     DataRouter::getInstance().publish(TOPIC_TRANSPORT_STATUS, wasConnected);
 
+    // Ядро 1 — BT_Transport (Bluetooth communication + OTA)
     xTaskCreatePinnedToCore(btTransportTask, "BT_Transport", 4096, NULL, 2, &btTaskHandle, 1);
 }
 
@@ -147,7 +227,6 @@ void btTransportStop() {
 
 bool btIsConnected() { return SerialBT.hasClient(); }
 bool btSend(const char* data) {
-    if (!SerialBT.hasClient()) return false;
+    if (!SerialBT.hasClient() || otaMode) return false;
     return SerialBT.print(data) > 0;
 }
-

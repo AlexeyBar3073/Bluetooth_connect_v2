@@ -382,6 +382,7 @@ void simulatorTask(void* parameter) {
 
 void simulatorStart() {
     if (!simulatorTaskHandle) {
+        // Ядро 0 — Simulator (физика автомобиля)
         xTaskCreatePinnedToCore(
             simulatorTask, "Simulator", 4096, NULL,
             TASK_PRIORITY_SIMULATOR, &simulatorTaskHandle, 0

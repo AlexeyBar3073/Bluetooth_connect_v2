@@ -203,7 +203,8 @@ void storageStart() {
         // Сначала загружаем и публикуем — кэш будет установлен ДО подписки других модулей
         loadAndPublish();
         // Потом запускаем задачу сохранения
-        xTaskCreatePinnedToCore(storageTask, "Storage", 4096, NULL, 1, &taskHandle, 0);
+        // Ядро 1 — Storage (NVS сохранение)
+        xTaskCreatePinnedToCore(storageTask, "Storage", 4096, NULL, 1, &taskHandle, 1);
 #if DEBUG_LOG
         Serial.println("[Storage] Started");
 #endif

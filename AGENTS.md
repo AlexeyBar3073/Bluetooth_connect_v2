@@ -94,7 +94,7 @@
   - `TOPIC_SERVICE_PACK` (0x03) — ServicePack (SERVICE, 1 сек)
   - `TOPIC_SETTINGS_PACK` (0x04) — SettingsPack (настройки, retain)
 - **Управляющие топики (0xF0–0xFF):**
-  - `TOPIC_CMD` (0xF0) — команды (CmdPayload)
+  - `TOPIC_CMD` (0xF0) — команды (uint8_t, enum Command)
   - `TOPIC_MSG_INCOMING` (0xF1) — JSON от Android
   - `TOPIC_MSG_OUTGOING` (0xF2) — JSON на Android
   - `TOPIC_TRANSPORT_STATUS` (0xF3) — статус Bluetooth
@@ -112,7 +112,9 @@
 ### Commands (common/commands.h)
 - **Роль:** Типобезопасные команды (13 шт)
 - **Enum Command:** CMD_NONE, CMD_RESET_TRIP_A, CMD_RESET_TRIP_B, CMD_RESET_AVG, CMD_FULL_TANK, CMD_CORRECT_ODO, CMD_GET_CFG, CMD_SET_CFG, CMD_KL_GET_DTC, CMD_KL_CLEAR_DTC, CMD_KL_RESET_ADAPT, CMD_KL_PUMP_ATF, CMD_KL_DETECT_PROTO
-- **CmdPayload:** cmd (enum) + union параметров + msg_id (uint32_t)
+- **Типизированные пакеты:** EnginePack, TripPack, ServicePack, SettingsPack, KlinePack, ClimatePack
+- **Команды:** uint8_t (enum Command)
+- **Сообщения:** char[] (JSON строки)
 - **Нельзя:** менять значения enum, удалять команды
 
 ### Simulator (simulator_task.cpp) — ВИРТУАЛЬНЫЙ ДВИГАТЕЛЬ
@@ -156,7 +158,7 @@
 - **Роль:** Опрос ЭБУ по К-Line (симуляция/реальный), автоопределение протокола
 - **Публикует:** KlinePack каждые 1000 мс в TOPIC_KLINE_PACK (температуры, DTC)
 - **Подписан на:** TOPIC_CMD (kl_* команды, QueuePolicy::FIFO_DROP, depth=5)
-- **Очередь:** модуль создаёт `xQueueCreate(5, sizeof(CmdPayload))` сам
+- **Очередь:** модуль создаёт `xQueueCreate(5, sizeof(uint8_t))` сам
 - **Режим симуляции:** тестовые данные (coolant=85-95°C, atf=70-85°C, DTC="P0135;P0141")
 - **Нельзя:** публиковать KlinePack чаще 1000 мс, формировать JSON, использовать DataBus
 
@@ -276,7 +278,7 @@ Android ──► SerialBT ──► BT Transport ──publish──► TOPIC_M
 2. **Callback <100 мкс** — только присвоение переменных
 3. **JSON:** `char buffer[512]` + `serializeJson(doc, buffer)`
 4. **Пакеты:** `publishPacket(topic, &pack, sizeof(pack))`
-5. **Команды:** `CmdPayload cmd; memset(&cmd, 0, sizeof(cmd)); cmd.cmd = CMD_...;`
+5. **Команды:** `uint8_t cmd; if (xQueueReceive(cmdQ, &cmd, 0) == pdTRUE) { if ((Command)cmd == CMD_...) { ... } }`
 6. **NVS:** putBytes/getBytes для пакетов, не чаще 100 мс
 7. **Loop:** heartbeat-мониторинг, перезапуск при падении
 8. **Модуль создаёт очередь сам** — `xQueueCreate()`, затем `router.subscribe()`

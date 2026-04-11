@@ -15,4 +15,7 @@ void btTransportStop();
 bool btIsConnected();
 bool btSend(const char* data);  // Отправить строку напрямую через SPP
 
+// OTA режим (вызывается из Protocol Task)
+void enterOTAMode();
+
 #endif // BT_TRANSPORT_H

@@ -289,7 +289,8 @@ void calculatorTask(void* parameter) {
 
 void calculatorStart() {
     if (!taskHandle) {
-        xTaskCreatePinnedToCore(calculatorTask, "Calculator", 4096, NULL, 2, &taskHandle, 0);
+        // Ядро 1 — Calculator (TripPack, расход, одометр)
+        xTaskCreatePinnedToCore(calculatorTask, "Calculator", 4096, NULL, 2, &taskHandle, 1);
 #if DEBUG_LOG
         Serial.println("[Calculator] Started");
 #endif

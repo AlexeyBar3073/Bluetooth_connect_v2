@@ -177,7 +177,8 @@ void klineTask(void* parameter) {
 
 void klineStart() {
     if (!taskHandle) {
-        xTaskCreatePinnedToCore(klineTask, "KLine", TASK_STACK_SIZE, NULL, TASK_PRIORITY_KLINE, &taskHandle, 0);
+        // Ядро 1 — K-Line (диагностика ЭБУ)
+        xTaskCreatePinnedToCore(klineTask, "KLine", TASK_STACK_SIZE, NULL, TASK_PRIORITY_KLINE, &taskHandle, 1);
 #if DEBUG_LOG
         Serial.println("[KLine] Started (P1)");
 #endif

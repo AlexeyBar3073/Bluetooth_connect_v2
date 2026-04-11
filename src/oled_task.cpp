@@ -168,6 +168,7 @@ void oledTask(void* parameter) {
 
 void oledStart() {
     if (!oledTaskHandle) {
+        // Ядро 0 — OLED (дисплей)
         xTaskCreatePinnedToCore(oledTask, "OLED", TASK_STACK_SIZE, NULL, 2, &oledTaskHandle, 0);
 #if DEBUG_LOG
         Serial.println("[OLED] Started (8K stack, P2)");

@@ -283,6 +283,19 @@ static void processIncoming(QueueHandle_t q) {
             continue;
         }
 
+        // --- enter_ota_mode — войти в режим OTA обновления ---
+        if (strcmp(cmd, "enter_ota_mode") == 0) {
+            // Публикуем команду в шину (не вызываем напрямую!)
+            DataRouter::getInstance().publish(TOPIC_CMD, CMD_ENTER_OTA_MODE);
+
+            // ACK сразу
+            JsonDocument resp;
+            injectAckId(resp);
+            resp["status"] = "ota_entering";
+            publishOutgoing(resp);
+            continue;
+        }
+
         // --- start/stop_telemetry ---
         if (strcmp(cmd, "start_telemetry") == 0) {
             // ACK сразу (квитанция подмешается)
@@ -528,6 +541,7 @@ void protocolTask(void* parameter) {
 
 void protocolStart() {
     if (!taskHandle) {
+        // Ядро 1 — Protocol (JSON-обработка команд Android)
         xTaskCreatePinnedToCore(protocolTask, "Protocol", TASK_STACK_PROTOCOL, NULL, 3, &taskHandle, 1);
 #if DEBUG_LOG
         Serial.println("[Protocol] Started");
