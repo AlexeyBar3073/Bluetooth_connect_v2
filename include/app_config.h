@@ -25,7 +25,7 @@
 //   - Забывать обновлять AGENTS.md при изменении версии
 //   - Устанавливать MAJOR=0 для продакшн-версии
 //
-// ВЕРСИЯ: 6.2.0 — MINOR: RealEngine + INA226
+// ВЕРСИЯ: 6.3.0 — MAJOR: RMT + PCNT (аппаратные драйверы ESP-IDF)
 // -----------------------------------------------------------------------------
 
 #ifndef APP_CONFIG_H
@@ -38,14 +38,14 @@
 // Формат: MAJOR.MINOR.BUILD
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
-// MINOR (1) — Новые модули в системе (K-Line, Climate)
-// BUILD (0) — Исправление ошибок
+// MINOR (3) — RMT + PCNT: аппаратные драйверы для форсунки и скорости
+// BUILD (0) — Начальная версия
 //
 #define FW_VERSION_MAJOR 6
-#define FW_VERSION_MINOR 2
-#define FW_VERSION_BUILD 1
-#define FW_VERSION_STR   "6.2.1"
-#define FW_VERSION_NOTE  "Fix: speed sensor calibration via Android"
+#define FW_VERSION_MINOR 3
+#define FW_VERSION_BUILD 0
+#define FW_VERSION_STR   "6.3.0"
+#define FW_VERSION_NOTE  "RMT+PCNT: аппаратный сбор данных с форсунки и датчика скорости"
 
 // =============================================================================
 // Аппаратные пины
