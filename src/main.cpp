@@ -29,6 +29,9 @@ extern void realEngineStart();    extern void realEngineStop();    extern bool r
 extern void oledStart();          extern void oledStop();          extern bool oledIsRunning();
 #endif
 
+// OTA статус (из bt_transport.cpp)
+extern bool otaIsActive();
+
 static void restartSimulator()   { simulatorStop();  delay(100); simulatorStart(); }
 static void restartStorage()     { storageStop();    delay(100); storageStart(); }
 static void restartCalculator()  { calculatorStop(); delay(100); calculatorStart(); }
@@ -125,6 +128,12 @@ void loop() {
     // Heartbeat-мониторинг всех модулей
     if (now - lastCheck >= 100) {
         lastCheck = now;
+
+        // НЕ перезапускать задачи если OTA активен!
+        if (otaIsActive()) {
+            vTaskDelay(50 / portTICK_PERIOD_MS);
+            return;
+        }
 
         // Критичные модули — Engine (Sim или Real)
 #if REAL_ENGINE_ENABLED

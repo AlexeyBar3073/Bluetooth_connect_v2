@@ -382,6 +382,9 @@ void simulatorTask(void* parameter) {
 
 void simulatorStart() {
     if (!simulatorTaskHandle) {
+        // СРАЗУ — чтобы loop() не думал что crashed
+        lastHeartbeat = millis();
+        isRunning = true;
         // Ядро 0 — Simulator (физика автомобиля)
         xTaskCreatePinnedToCore(
             simulatorTask, "Simulator", 4096, NULL,

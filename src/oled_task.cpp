@@ -168,6 +168,9 @@ void oledTask(void* parameter) {
 
 void oledStart() {
     if (!oledTaskHandle) {
+        // СРАЗУ — чтобы loop() не думал что crashed
+        lastHeartbeat = millis();
+        isRunning = true;
         // Ядро 0 — OLED (дисплей)
         xTaskCreatePinnedToCore(oledTask, "OLED", TASK_STACK_SIZE, NULL, 2, &oledTaskHandle, 0);
 #if DEBUG_LOG

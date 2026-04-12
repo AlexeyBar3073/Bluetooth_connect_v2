@@ -13,7 +13,6 @@
 #include "data_router.h"
 #include "topics.h"
 #include "commands.h"
-#include "ota_handler.h"
 #include <BluetoothSerial.h>
 
 BluetoothSerial SerialBT;  // Глобальный (не static) — используется в ota_handler.cpp
@@ -25,58 +24,11 @@ static unsigned long   lastHeartbeat = 0;
 
 // --- Режим OTA ---
 static bool            otaMode = false;
-static char            rxBuffer[256];
-static uint8_t         otaBuffer[2048];  // Буфер для OTA данных
+static char            rxBuffer[512];
 
 // --- Очереди (создаются модулем, регистрируются в DataRouter) ---
 static QueueHandle_t   txQueue = NULL;       // Входящий JSON от Android → BT → шина
 static QueueHandle_t   cmdQueue = NULL;      // Команды из шины (OTA)
-
-// =============================================================================
-// processOTA — обработка OTA команд
-// =============================================================================
-
-static void processOTA() {
-    if (SerialBT.available()) {
-        size_t len = SerialBT.readBytes(otaBuffer, sizeof(otaBuffer));
-        otaHandle(otaBuffer, len);
-    }
-}
-
-// =============================================================================
-// enterOTAMode — войти в режим OTA
-// =============================================================================
-
-void enterOTAMode() {
-    if (otaMode) return;
-
-    Serial.println("[BT Transport] === ENTERING OTA MODE ===");
-    Serial.println("[BT Transport] Stopping non-critical tasks...");
-
-    // Остановить задачи, которые могут мешать OTA
-    // Protocol, Calculator, Simulator/RealEngine — останавливаем
-    extern void protocolStop();
-    extern void calculatorStop();
-    extern void simulatorStop();
-    extern void realEngineStop();
-    extern void klineStop();
-    extern void climateStop();
-
-    protocolStop();
-    calculatorStop();
-    simulatorStop();
-    realEngineStop();
-    klineStop();
-    climateStop();
-
-    otaMode = true;
-
-    // Ответ Android
-    SerialBT.write(OTA_RSP_READY);
-    SerialBT.println("\n[OTA] Ready to receive firmware");
-
-    Serial.println("[BT Transport] OTA MODE ACTIVE");
-}
 
 // =============================================================================
 // btTransportTask — Задача
@@ -107,7 +59,8 @@ void btTransportTask(void* parameter) {
             uint8_t cmd;
             while (xQueueReceive(cmdQueue, &cmd, 0) == pdTRUE) {
                 if ((Command)cmd == CMD_ENTER_OTA_MODE) {
-                    enterOTAMode();
+                    // Старый бинарный OTA больше не используется
+                    // Всё через JSON в Protocol
                 }
             }
         }
@@ -120,13 +73,6 @@ void btTransportTask(void* parameter) {
 #if DEBUG_LOG
             Serial.printf("[BT Transport] %s\n", isConnected ? "CONNECTED" : "DISCONNECTED");
 #endif
-        }
-
-        // --- Режим OTA ---
-        if (otaMode) {
-            processOTA();
-            vTaskDelay(10 / portTICK_PERIOD_MS);
-            continue;
         }
 
         // --- Обычный режим: RX ---
@@ -227,6 +173,6 @@ void btTransportStop() {
 
 bool btIsConnected() { return SerialBT.hasClient(); }
 bool btSend(const char* data) {
-    if (!SerialBT.hasClient() || otaMode) return false;
+    if (!SerialBT.hasClient()) return false;
     return SerialBT.print(data) > 0;
 }

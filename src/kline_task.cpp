@@ -177,6 +177,9 @@ void klineTask(void* parameter) {
 
 void klineStart() {
     if (!taskHandle) {
+        // СРАЗУ — чтобы loop() не думал что crashed
+        lastHeartbeat = millis();
+        isRunningFlag = true;
         // Ядро 1 — K-Line (диагностика ЭБУ)
         xTaskCreatePinnedToCore(klineTask, "KLine", TASK_STACK_SIZE, NULL, TASK_PRIORITY_KLINE, &taskHandle, 1);
 #if DEBUG_LOG

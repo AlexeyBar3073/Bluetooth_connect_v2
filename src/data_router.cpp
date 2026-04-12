@@ -40,6 +40,30 @@ DataRouter& DataRouter::getInstance() {
 
 void DataRouter::begin() {
     _mutex = xSemaphoreCreateMutex();
+    _resetInternal();
+#if DEBUG_LOG
+    Serial.println("[DataRouter] Initialized (Typed topics, module-owned queues)");
+#endif
+}
+
+// =============================================================================
+// reset: Полная очистка всех подписчиков (для OTA перезапуска)
+// =============================================================================
+
+void DataRouter::reset() {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    _resetInternal();
+    xSemaphoreGive(_mutex);
+#if DEBUG_LOG
+    Serial.println("[DataRouter] RESET: All subscribers cleared");
+#endif
+}
+
+// =============================================================================
+// _resetInternal — внутренняя очистка (вызывается под мьютексом)
+// =============================================================================
+
+void DataRouter::_resetInternal() {
     for (int i = 0; i < TOPIC_COUNT; i++) {
         _topicRouters[i].valid = false;
         _topicRouters[i].defaultPolicy = QueuePolicy::OVERWRITE;
@@ -49,9 +73,6 @@ void DataRouter::begin() {
         _topicRouters[i].packetValid = false;
         _topicRouters[i].packetLen = 0;
     }
-#if DEBUG_LOG
-    Serial.println("[DataRouter] Initialized (Typed topics, module-owned queues)");
-#endif
 }
 
 // =============================================================================

@@ -104,6 +104,7 @@ class DataRouter {
 public:
     static DataRouter& getInstance();
     void begin();
+    void reset();  // Полная очистка всех подписчиков (для OTA)
 
     // --- Подписка: модуль передаёт СВОЮ очередь. retain=true → получит кэш ---
     bool subscribe(Topic topic, QueueHandle_t queue, QueuePolicy policy, bool retain = false);
@@ -144,6 +145,8 @@ public:
 
 private:
     DataRouter() {}
+
+    void _resetInternal();  // Внутренняя очистка (вызывается под мьютексом)
 
     // --- Внутренняя структура: слот подписчика ---
     struct SubscriberSlot {

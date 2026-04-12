@@ -692,6 +692,9 @@ static void realEngineTask(void* parameter) {
 
 void realEngineStart() {
     if (!taskHandle) {
+        // СРАЗУ — чтобы loop() не думал что crashed
+        lastHeartbeat = millis();
+        isRunningFlag = true;
         // Ядро 0 — RealEngine (ISR, RMT, PCNT — аппаратные драйверы)
         xTaskCreatePinnedToCore(realEngineTask, "RealEng", TASK_STACK_SIZE, NULL,
                                 TASK_PRIORITY_SIMULATOR, &taskHandle, 0);

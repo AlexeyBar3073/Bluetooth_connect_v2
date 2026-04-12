@@ -86,6 +86,9 @@ void climateTask(void* parameter) {
 
 void climateStart() {
     if (!taskHandle) {
+        // СРАЗУ — чтобы loop() не думал что crashed
+        lastHeartbeat = millis();
+        isRunningFlag = true;
         // Ядро 1 — Climate (температура, сервис)
         xTaskCreatePinnedToCore(climateTask, "Climate", TASK_STACK_CLIMATE, NULL, TASK_PRIORITY_CLIMATE, &taskHandle, 1);
 #if DEBUG_LOG

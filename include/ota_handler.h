@@ -1,68 +1,22 @@
 // -----------------------------------------------------------------------------
 // ota_handler.h
-// OTA обновление прошивки через Bluetooth Serial (SPP).
-//
-// Протокол:
-//   Android → ESP32:
-//     OTA_CMD_START  [0xA0][SIZE:4][CRC:4]  — начать обновление
-//     OTA_CMD_DATA   [0xA1][DATA:1024]      — чанк прошивки
-//     OTA_CMD_END    [0xA2]                  — завершить, проверить, перезагрузить
-//
-//   ESP32 → Android:
-//     OTA_RSP_READY  [0xB0]                  — готов принять
-//     OTA_RSP_ACK    [0xB1]                  — чанк принят
-//     OTA_RSP_NACK   [0xB2]                  — ошибка, переотправить
-//     OTA_RSP_OK     [0xB3]                  — обновление завершено
-//     OTA_RSP_ERR    [0xB4]                  — ошибка
-//
-// ВЕРСИЯ: 6.4.0 — OTA через Bluetooth Serial
+// OTA обновление прошивки через JSON-протокол.
 // -----------------------------------------------------------------------------
 
 #ifndef OTA_HANDLER_H
 #define OTA_HANDLER_H
 
-#include <stdint.h>
+#include <Arduino.h>
+#include <stdbool.h>
 #include <stddef.h>
 
-// =============================================================================
-// OTA команды (Android → ESP32)
-// =============================================================================
+// lifecycle
+bool otaBegin(size_t firmwareSize);
+bool otaWriteChunk(const char* base64Data);
+bool otaFinalize();
 
-#define OTA_CMD_START   0xA0   // Начать обновление (размер + CRC)
-#define OTA_CMD_DATA    0xA1   // Данные прошивки (чанк)
-#define OTA_CMD_END     0xA2   // Завершить обновление
-
-// =============================================================================
-// OTA ответы (ESP32 → Android)
-// =============================================================================
-
-#define OTA_RSP_READY   0xB0   // Готов принять
-#define OTA_RSP_ACK     0xB1   // Чанк принят
-#define OTA_RSP_NACK    0xB2   // Ошибка, переотправить
-#define OTA_RSP_OK      0xB3   // Обновление завершено
-#define OTA_RSP_ERR     0xB4   // Ошибка
-
-// =============================================================================
-// OTA размер чанка
-// =============================================================================
-
-#define OTA_CHUNK_SIZE  1024   // Байт за раз (оптимально для SPP)
-
-// =============================================================================
-// Публичный API
-// =============================================================================
-
-// Обработать байты OTA (вызывается из BT transport в режиме OTA)
-// Возвращает true если OTA активен
-bool otaHandle(const uint8_t* data, size_t len);
-
-// Начать OTA режим (остановить задачи, подготовить Update)
-bool otaStart(uint32_t firmwareSize, uint32_t crc);
-
-// Проверить, активен ли OTA режим
-bool otaIsActive();
-
-// Получить прогресс OTA (0-100%)
-uint8_t otaGetProgress();
+// status
+int  otaGetProgress();
+// otaIsActive() declared in bt_transport.h
 
 #endif // OTA_HANDLER_H

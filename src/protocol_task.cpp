@@ -10,18 +10,6 @@
 // - Квитанции (msg_id → ack_id): только Protocol знает про них
 //
 // -----------------------------------------------------------------------------
-// ПРАВИЛА ФАЙЛА:
-// -----------------------------------------------------------------------------
-// ✅ можно:
-//   - Добавлять новые команды
-//   - Менять поля JSON
-//   - Менять частоту фракционной отправки
-//
-// ❌ нельзя:
-//   - Блокировать >10 мс
-//   - Использовать String для outgoing JSON
-//   - Передавать msg_id/ack_id другим модулям (это территория Protocol)
-//
 // ВЕРСИЯ: 5.1.0 — MAJOR: KlinePack/ClimatePack, квитанции только в Protocol
 // -----------------------------------------------------------------------------
 
@@ -31,6 +19,7 @@
 #include "packets.h"
 #include "commands.h"
 #include "bt_transport.h"
+#include "ota_handler.h"
 #include "app_config.h"
 #include <ArduinoJson.h>
 
@@ -49,39 +38,33 @@ static unsigned long lastHeartbeat    = 0;
 static bool          isStreamingActive = false;
 
 // --- Квитанция доставки (msg_id → ack_id) ---
-// Только Protocol знает про эти поля.
-// При получении команды: сохраняем msg_id
-// При отправке любого исходящего: если lastMsgId != 0 → добавляем ack_id → обнуляем
 static int lastMsgId = 0;
 
 // --- Кэш телеметрии (обновляется из очередей пакетов) ---
 static struct {
     // EnginePack
-    float   speed = 0, rpm = 0, voltage = 0, inst_fuel = 0;
-    float   fuel_level = 0;
-    bool    eng = false, hl = false;
-
+    float speed = 0, rpm = 0, voltage = 0, inst_fuel = 0;
+    float fuel_level = 0;
+    bool eng = false, hl = false;
     // TripPack
-    double  odo = 0;
-    float   trip_a = 0, fuel_a = 0, trip_b = 0, fuel_b = 0;
-    float   trip_cur = 0, fuel_cur = 0, fuel = 0, avg = 0, avg_total = 0;
-
+    double odo = 0;
+    float trip_a = 0, fuel_a = 0, trip_b = 0, fuel_b = 0;
+    float trip_cur = 0, fuel_cur = 0, fuel = 0, avg = 0, avg_total = 0;
     // KlinePack (AKPP + диагностика)
-    float   t_cool = 0, t_atf = 0;
-    float   voltage_kl = 0, fuel_pct = 0, out_shaft = 0;
-    bool    tcc = false;
-    uint8_t selector = 3;    // D
+    float t_cool = 0, t_atf = 0;
+    float voltage_kl = 0, fuel_pct = 0, out_shaft = 0;
+    bool tcc = false;
+    uint8_t selector = 3;  // D
     uint8_t gear = 0;
-    char    dtc[64] = "";
-
+    char dtc[64] = "";
     // ClimatePack
-    float   t_int = 0, t_ext = 0;
-    bool    tire = false, wash = false;
+    float t_int = 0, t_ext = 0;
+    bool tire = false, wash = false;
 } tel;
 
 // --- Кэш настроек ---
 static struct {
-    float   tank = 60.0f, inj_perf = 250.0f, spd_sig = 3.0f;
+    float tank = 60.0f, inj_perf = 250.0f, spd_sig = 3.0f;
     uint8_t inj_cnt = 4, kl_proto = 0;
 } cfg;
 
@@ -90,6 +73,7 @@ static char outBuffer[512];
 // =============================================================================
 // processEnginePack
 // =============================================================================
+
 static void processEnginePack(QueueHandle_t q) {
     EnginePack p;
     if (xQueueReceive(q, &p, 0) == pdTRUE) {
@@ -106,6 +90,7 @@ static void processEnginePack(QueueHandle_t q) {
 // =============================================================================
 // processTripPack
 // =============================================================================
+
 static void processTripPack(QueueHandle_t q) {
     TripPack p;
     if (xQueueReceive(q, &p, 0) == pdTRUE) {
@@ -125,6 +110,7 @@ static void processTripPack(QueueHandle_t q) {
 // =============================================================================
 // processKlinePack
 // =============================================================================
+
 static void processKlinePack(QueueHandle_t q) {
     KlinePack p;
     if (xQueueReceive(q, &p, 0) == pdTRUE) {
@@ -143,6 +129,7 @@ static void processKlinePack(QueueHandle_t q) {
 // =============================================================================
 // processClimatePack
 // =============================================================================
+
 static void processClimatePack(QueueHandle_t q) {
     ClimatePack p;
     if (xQueueReceive(q, &p, 0) == pdTRUE) {
@@ -156,6 +143,7 @@ static void processClimatePack(QueueHandle_t q) {
 // =============================================================================
 // processSettingsPack
 // =============================================================================
+
 static void processSettingsPack(QueueHandle_t q) {
     SettingsPack p;
     if (xQueueReceive(q, &p, 0) == pdTRUE) {
@@ -170,6 +158,7 @@ static void processSettingsPack(QueueHandle_t q) {
 // =============================================================================
 // Forward declarations
 // =============================================================================
+
 static void buildFastJson(JsonDocument& doc);
 static void addTripFields(JsonDocument& doc);
 static void addServiceFields(JsonDocument& doc);
@@ -179,6 +168,7 @@ static void publishOutgoing(JsonDocument& doc);
 // =============================================================================
 // injectAckId: Подмешивает ack_id если есть квитанция, обнуляет lastMsgId
 // =============================================================================
+
 static void injectAckId(JsonDocument& doc) {
     if (lastMsgId != 0) {
         doc["ack_id"] = lastMsgId;
@@ -187,7 +177,7 @@ static void injectAckId(JsonDocument& doc) {
 }
 
 // =============================================================================
-// publishOutgoing: Сериализует JSON и отправляет через DataRouter
+// publishOutgoing: Сериализует JSON и отправляет через BT
 // =============================================================================
 
 static void publishOutgoing(JsonDocument& doc) {
@@ -205,21 +195,13 @@ static void publishOutgoing(JsonDocument& doc) {
 // =============================================================================
 // processIncoming: Обработка входящих JSON-команд
 // =============================================================================
-//
-// Только Protocol знает про msg_id/ack_id.
-// Извлекает msg_id, сохраняет локально, обрабатывает команду,
-// отправляет ACK (квитанция подмешается к ближайшему исходящему).
-//
+
 static void processIncoming(QueueHandle_t q) {
     char rxBuffer[256];
     while (xQueueReceive(q, rxBuffer, 0) == pdTRUE) {
-#if DEBUG_LOG
-        Serial.printf("[Protocol] RX JSON: %s\n", rxBuffer);
-#endif
 
         JsonDocument doc;
         if (deserializeJson(doc, rxBuffer)) {
-            // Невалидный JSON
             JsonDocument err;
             err["error"] = "Invalid JSON";
             publishOutgoing(err);
@@ -228,37 +210,33 @@ static void processIncoming(QueueHandle_t q) {
 
         const char* cmd = doc["command"];
         if (!cmd) cmd = doc["cmd"];
-        if (!cmd) {
-            continue;
-        }
+        if (!cmd) continue;
 
-        // Извлекаем msg_id — квитанция доставки
+        // Извлекаем msg_id
         JsonVariant msgIdVar = doc["msg_id"];
         if (!msgIdVar.isNull() && msgIdVar.is<int>()) {
             lastMsgId = msgIdVar.as<int>();
         }
 
-#if DEBUG_LOG
-        Serial.printf("[Protocol] Command='%s', msg_id=%d\n", cmd, lastMsgId);
-#endif
-
-        // --- get_cfg: ответ из локального кэша настроек ---
+        // --- get_cfg ---
         if (strcmp(cmd, "get_cfg") == 0) {
             JsonDocument resp;
             injectAckId(resp);
             JsonObject c = resp["cfg"].to<JsonObject>();
-            c["tV"] = cfg.tank; c["iPerf"] = cfg.inj_perf;
-            c["iCnt"] = cfg.inj_cnt; c["sSig"] = cfg.spd_sig;
-            c["kPrt"] = cfg.kl_proto; c["fw"] = FW_VERSION_STR;
+            c["tV"] = cfg.tank;
+            c["iPerf"] = cfg.inj_perf;
+            c["iCnt"] = cfg.inj_cnt;
+            c["sSig"] = cfg.spd_sig;
+            c["kPrt"] = cfg.kl_proto;
+            c["fw"] = FW_VERSION_STR;
             publishOutgoing(resp);
             continue;
         }
 
-        // --- set_cfg: публикуем SettingsPack в шину ---
+        // --- set_cfg ---
         if (strcmp(cmd, "set_cfg") == 0) {
             JsonObject data = doc["data"];
             if (!data) data = doc.as<JsonObject>();
-
             SettingsPack pack;
             memset(&pack, 0, sizeof(pack));
             pack.version = 1;
@@ -270,25 +248,21 @@ static void processIncoming(QueueHandle_t q) {
 
             if (data["tV"]) pack.tank_capacity = data["tV"].as<float>();
             if (data["iPerf"]) pack.injector_flow = data["iPerf"].as<float>();
-            if (data["iCnt"]) pack.injector_count = data["iCnt"].as<int>();
+            if (data["iCnt"]) pack.injector_count = data["iCnt"].as<uint8_t>();
             if (data["sSig"]) pack.pulses_per_meter = data["sSig"].as<float>();
-            if (data["kPrt"]) pack.kline_protocol = data["kPrt"].as<int>();
+            if (data["kPrt"]) pack.kline_protocol = data["kPrt"].as<uint8_t>();
 
             DataRouter::getInstance().publishPacket(TOPIC_SETTINGS_PACK, &pack, sizeof(pack));
 
-            // ACK (квитанция подмешается)
             JsonDocument resp;
             injectAckId(resp);
             publishOutgoing(resp);
             continue;
         }
 
-        // --- enter_ota_mode — войти в режим OTA обновления ---
+        // --- enter_ota_mode — войти в режим OTA обновления (устаревший, бинарный) ---
         if (strcmp(cmd, "enter_ota_mode") == 0) {
-            // Публикуем команду в шину (не вызываем напрямую!)
             DataRouter::getInstance().publish(TOPIC_CMD, CMD_ENTER_OTA_MODE);
-
-            // ACK сразу
             JsonDocument resp;
             injectAckId(resp);
             resp["status"] = "ota_entering";
@@ -296,42 +270,75 @@ static void processIncoming(QueueHandle_t q) {
             continue;
         }
 
-        // --- start/stop_telemetry ---
-        if (strcmp(cmd, "start_telemetry") == 0) {
-            // ACK сразу (квитанция подмешается)
-            JsonDocument resp;
-            injectAckId(resp);
-            publishOutgoing(resp);
-
-            isStreamingActive = true;
-#if DEBUG_LOG
-            Serial.println("[Protocol] Streaming STARTED");
-#endif
+        // --- ota_start — начать OTA обновление (JSON) ---
+        if (strcmp(cmd, "ota_start") == 0) {
+            int fwSize = doc["data"]["size"];
+            if (fwSize > 0) {
+                bool ok = otaBegin(fwSize);
+                JsonDocument resp;
+                injectAckId(resp);
+                if (!ok) resp["ota"] = "error";
+                publishOutgoing(resp);
+            }
             continue;
         }
-        else if (strcmp(cmd, "stop_telemetry") == 0) {
+
+        // --- ota_data — порция данных прошивки (JSON) ---
+        if (strcmp(cmd, "ota_data") == 0) {
+            int pack = doc["data"]["pack"];
+            const char* b64 = doc["data"]["bin"];
+            if (b64 && pack > 0) {
+                bool ok = otaWriteChunk(b64);
+                JsonDocument resp;
+                injectAckId(resp);
+                resp["ota_read"] = pack;
+                if (!ok) resp["ota"] = "error";
+                publishOutgoing(resp);
+            }
+            continue;
+        }
+
+        // --- ota_end — завершение OTA ---
+        if (strcmp(cmd, "ota_end") == 0) {
+            bool ok = otaFinalize();
+            JsonDocument resp;
+            injectAckId(resp);
+            if (!ok) resp["ota"] = "error";
+            publishOutgoing(resp);
+            if (ok) {
+                Serial.println("[Protocol] OTA complete. Rebooting...");
+                delay(500);
+                ESP.restart();
+            }
+            continue;
+        }
+
+        // --- start/stop_telemetry ---
+        if (strcmp(cmd, "start_telemetry") == 0) {
             JsonDocument resp;
             injectAckId(resp);
             publishOutgoing(resp);
-
+            isStreamingActive = true;
+            continue;
+        }
+        if (strcmp(cmd, "stop_telemetry") == 0) {
+            JsonDocument resp;
+            injectAckId(resp);
+            publishOutgoing(resp);
             isStreamingActive = false;
-#if DEBUG_LOG
-            Serial.println("[Protocol] Streaming STOPPED");
-#endif
             continue;
         }
 
         // --- Команды в шину (enum Command) ---
         Command enumCmd = CMD_NONE;
-
-        if (strcmp(cmd, "reset_trip_a") == 0)       enumCmd = CMD_RESET_TRIP_A;
-        else if (strcmp(cmd, "reset_trip_b") == 0)  enumCmd = CMD_RESET_TRIP_B;
-        else if (strcmp(cmd, "reset_avg") == 0)     enumCmd = CMD_RESET_AVG;
-        else if (strcmp(cmd, "full_tank") == 0)     enumCmd = CMD_FULL_TANK;
-        else if (strcmp(cmd, "kl_get_dtc") == 0)    enumCmd = CMD_KL_GET_DTC;
-        else if (strcmp(cmd, "kl_clear_dtc") == 0)  enumCmd = CMD_KL_CLEAR_DTC;
+        if (strcmp(cmd, "reset_trip_a") == 0) enumCmd = CMD_RESET_TRIP_A;
+        else if (strcmp(cmd, "reset_trip_b") == 0) enumCmd = CMD_RESET_TRIP_B;
+        else if (strcmp(cmd, "reset_avg") == 0) enumCmd = CMD_RESET_AVG;
+        else if (strcmp(cmd, "full_tank") == 0) enumCmd = CMD_FULL_TANK;
+        else if (strcmp(cmd, "kl_get_dtc") == 0) enumCmd = CMD_KL_GET_DTC;
+        else if (strcmp(cmd, "kl_clear_dtc") == 0) enumCmd = CMD_KL_CLEAR_DTC;
         else if (strcmp(cmd, "kl_reset_adapt") == 0) enumCmd = CMD_KL_RESET_ADAPT;
-        else if (strcmp(cmd, "kl_pump_atf") == 0)   enumCmd = CMD_KL_PUMP_ATF;
+        else if (strcmp(cmd, "kl_pump_atf") == 0) enumCmd = CMD_KL_PUMP_ATF;
         else if (strcmp(cmd, "kl_detect_protocol") == 0) enumCmd = CMD_KL_DETECT_PROTO;
         else if (strcmp(cmd, "calibrate_speed_start") == 0) {
             DataRouter::getInstance().publish(TOPIC_CMD, CMD_CALIBRATE_SPEED);
@@ -340,46 +347,25 @@ static void processIncoming(QueueHandle_t q) {
             resp["status"] = "calibration_started";
             publishOutgoing(resp);
             continue;
-        }
-        else if (strcmp(cmd, "calibrate_speed_end") == 0) {
+        } else if (strcmp(cmd, "calibrate_speed_end") == 0) {
             int distanceM = 0;
-            if (doc["data"].is<int>()) {
-                distanceM = doc["data"].as<int>();
-            } else if (doc["data"]["distance_m"].is<int>()) {
-                distanceM = doc["data"]["distance_m"].as<int>();
-            }
-            if (distanceM > 0) {
-                DataRouter::getInstance().publish(TOPIC_CALIBRATE_DIST, distanceM);
-                Serial.printf("[Protocol] calibrate_speed_end: %d m\n", distanceM);
-            }
+            if (doc["data"].is<int>()) distanceM = doc["data"].as<int>();
+            else if (doc["data"]["distance_m"].is<int>()) distanceM = doc["data"]["distance_m"].as<int>();
+            if (distanceM > 0) DataRouter::getInstance().publish(TOPIC_CALIBRATE_DIST, distanceM);
             JsonDocument resp;
             injectAckId(resp);
             resp["status"] = "calibration_saved";
             publishOutgoing(resp);
             continue;
-        }
-        else if (strcmp(cmd, "correct_odo") == 0) {
-            // Параметрическая команда — публикуем в отдельный топик
-            // Android шлёт: {"data": 123456} или {"data":{"value":123456}}
+        } else if (strcmp(cmd, "correct_odo") == 0) {
             int odo_value = 0;
-            if (doc["data"].is<int>()) {
-                odo_value = doc["data"].as<int>();
-            } else if (doc["data"]["value"].is<int>()) {
-                odo_value = doc["data"]["value"].as<int>();
-            }
+            if (doc["data"].is<int>()) odo_value = doc["data"].as<int>();
+            else if (doc["data"]["value"].is<int>()) odo_value = doc["data"]["value"].as<int>();
             DataRouter::getInstance().publish(TOPIC_CORRECT_ODO, odo_value);
-#if DEBUG_LOG
-            Serial.printf("[Protocol] correct_odo: %d km\n", odo_value);
-#endif
-            // ACK подмешается в ближайшее исходящее
             continue;
-        }
-        else if (strcmp(cmd, "set_cfg") == 0) {
-            // Обработано выше — не должно попасть сюда
+        } else if (strcmp(cmd, "set_cfg") == 0) {
             continue;
-        }
-        else {
-            // Неизвестная команда
+        } else {
             JsonDocument resp;
             injectAckId(resp);
             resp["error"] = "Unknown command";
@@ -387,10 +373,7 @@ static void processIncoming(QueueHandle_t q) {
             continue;
         }
 
-        // Публикуем enum Command в шину (1 байт — без msg_id, msg_id знает только Protocol)
         DataRouter::getInstance().publish(TOPIC_CMD, enumCmd);
-
-        // ACK (квитанция подмешается)
         JsonDocument resp;
         injectAckId(resp);
         publishOutgoing(resp);
@@ -398,7 +381,7 @@ static void processIncoming(QueueHandle_t q) {
 }
 
 // =============================================================================
-// buildFastJson: Заполняет документ только FAST-полями
+// buildFastJson
 // =============================================================================
 
 static void buildFastJson(JsonDocument& doc) {
@@ -422,7 +405,7 @@ static void buildFastJson(JsonDocument& doc) {
 }
 
 // =============================================================================
-// addTripFields: Добавляет TRIP-поля к существующему документу
+// addTripFields
 // =============================================================================
 
 static void addTripFields(JsonDocument& doc) {
@@ -441,7 +424,7 @@ static void addTripFields(JsonDocument& doc) {
 }
 
 // =============================================================================
-// addServiceFields: Добавляет SERVICE-поля (KlinePack + ClimatePack)
+// addServiceFields
 // =============================================================================
 
 static void addServiceFields(JsonDocument& doc) {
@@ -464,7 +447,6 @@ void protocolTask(void* parameter) {
     isRunningFlag = true;
     DataRouter& dr = DataRouter::getInstance();
 
-    // Создаём очереди для пакетов (модуль создаёт, DataRouter регистрирует)
     QueueHandle_t engineQ   = xQueueCreate(1, sizeof(EnginePack));
     QueueHandle_t tripQ     = xQueueCreate(1, sizeof(TripPack));
     QueueHandle_t klineQ    = xQueueCreate(1, sizeof(KlinePack));
@@ -477,8 +459,7 @@ void protocolTask(void* parameter) {
     dr.subscribe(TOPIC_CLIMATE_PACK,  climateQ,  QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE, true);
 
-    // Подписка на входящие (OVERWRITE, depth=1 — всегда актуальное, повторная отправка при необходимости)
-    QueueHandle_t incomingQ = xQueueCreate(1, 128);
+    QueueHandle_t incomingQ = xQueueCreate(1, 512);
     dr.subscribe(TOPIC_MSG_INCOMING, incomingQ, QueuePolicy::OVERWRITE);
 
 #if DEBUG_LOG
@@ -491,18 +472,18 @@ void protocolTask(void* parameter) {
     while (1) {
         lastHeartbeat = millis();
 
-        // Чтение очередей пакетов
         if (engineQ)   processEnginePack(engineQ);
         if (tripQ)     processTripPack(tripQ);
         if (klineQ)    processKlinePack(klineQ);
         if (climateQ)  processClimatePack(climateQ);
         if (settingsQ) processSettingsPack(settingsQ);
 
-        // Обработка входящих команд
         if (incomingQ) processIncoming(incomingQ);
 
-        // Фракционная отправка телеметрии (ТЗ п.5.1–5.6)
-        if (!isStreamingActive) { vTaskDelay(10 / portTICK_PERIOD_MS); continue; }
+        if (!isStreamingActive) {
+            vTaskDelay(10 / portTICK_PERIOD_MS);
+            continue;
+        }
 
         unsigned long now = millis();
         if (now - lastSend >= 100) {
@@ -512,23 +493,12 @@ void protocolTask(void* parameter) {
             if (!btIsConnected()) continue;
 
             JsonDocument doc;
-            buildFastJson(doc);  // FAST: spd, rpm, vlt, eng, hl, gear, sel, tcc, fuel
+            buildFastJson(doc);
+            if (counter % 5 == 0) addTripFields(doc);
+            if (counter % 10 == 0) addServiceFields(doc);
 
-            if (counter % 5 == 0) addTripFields(doc);    // TRIP: каждые 500мс
-            if (counter % 10 == 0) addServiceFields(doc); // SERVICE: каждые 1000мс
-
-            // Подмешиваем ack_id если есть квитанция
             injectAckId(doc);
-
             publishOutgoing(doc);
-
-            // Отладка: первые 3 сообщения и каждое 100-е — выводим полный JSON
-            static int logCount = 0;
-#if DEBUG_LOG
-            if (++logCount <= 3 || logCount % 100 == 0) {
-                Serial.printf("[Protocol] >>> TX #%d counter=%d, len=%zu, json=%s", logCount, counter, strlen(outBuffer), outBuffer);
-            }
-#endif
         }
 
         vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -541,6 +511,9 @@ void protocolTask(void* parameter) {
 
 void protocolStart() {
     if (!taskHandle) {
+        // СРАЗУ — чтобы loop() не думал что crashed
+        lastHeartbeat = millis();
+        isRunningFlag = true;
         // Ядро 1 — Protocol (JSON-обработка команд Android)
         xTaskCreatePinnedToCore(protocolTask, "Protocol", TASK_STACK_PROTOCOL, NULL, 3, &taskHandle, 1);
 #if DEBUG_LOG
@@ -563,5 +536,3 @@ void protocolStop() {
 bool protocolIsRunning() {
     return isRunningFlag && (millis() - lastHeartbeat) < 3000;
 }
-
-

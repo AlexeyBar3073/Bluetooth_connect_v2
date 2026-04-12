@@ -289,6 +289,9 @@ void calculatorTask(void* parameter) {
 
 void calculatorStart() {
     if (!taskHandle) {
+        // СРАЗУ — чтобы loop() не думал что crashed
+        lastHeartbeat = millis();
+        isRunningFlag = true;
         // Ядро 1 — Calculator (TripPack, расход, одометр)
         xTaskCreatePinnedToCore(calculatorTask, "Calculator", 4096, NULL, 2, &taskHandle, 1);
 #if DEBUG_LOG

@@ -200,6 +200,9 @@ void storageTask(void* parameter) {
 
 void storageStart() {
     if (!taskHandle) {
+        // СРАЗУ — чтобы loop() не думал что crashed
+        lastHeartbeat = millis();
+        isRunningFlag = true;
         // Сначала загружаем и публикуем — кэш будет установлен ДО подписки других модулей
         loadAndPublish();
         // Потом запускаем задачу сохранения

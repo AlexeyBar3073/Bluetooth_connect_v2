@@ -39,13 +39,13 @@
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
 // MINOR (4) — OTA обновление прошивки + восстановление архитектуры
-// BUILD (0) — Начальная версия
+// BUILD (1) — Версия и имя файла прошивки
 //
 #define FW_VERSION_MAJOR 6
-#define FW_VERSION_MINOR 4
+#define FW_VERSION_MINOR 5
 #define FW_VERSION_BUILD 0
-#define FW_VERSION_STR   "6.4.0"
-#define FW_VERSION_NOTE  "OTA via BT + DataRouter arch fixed"
+#define FW_VERSION_STR   "6.5.0"
+#define FW_VERSION_NOTE  "OTA Android test"
 
 // =============================================================================
 // Аппаратные пины
