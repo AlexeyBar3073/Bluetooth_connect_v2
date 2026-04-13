@@ -206,11 +206,13 @@ static void processIncoming(QueueHandle_t q) {
     while (xQueueReceive(q, rxIncomingBuffer, 0) == pdTRUE) {
 
         JsonDocument doc;
-        if (deserializeJson(doc, rxIncomingBuffer)) {
-            Serial.printf("[Proto] JSON parse error: %s\n", rxIncomingBuffer);
-            JsonDocument err;
-            err["error"] = "Invalid JSON";
-            publishOutgoing(err);
+        DeserializationError err = deserializeJson(doc, rxIncomingBuffer);
+        if (err) {
+            Serial.printf("[Proto] JSON parse error: %s (free heap: %d)\n",
+                          err.c_str(), (int)ESP.getFreeHeap());
+            JsonDocument resp;
+            resp["error"] = "Invalid JSON";
+            publishOutgoing(resp);
             continue;
         }
 
@@ -295,13 +297,18 @@ static void processIncoming(QueueHandle_t q) {
             continue;
         }
 
-        // --- ota_data — порция данных прошивки → только bin в шину → ack_id ---
+        // --- ota_data — порция данных прошивки → только bin в шину → СРАЗУ ack_id ---
         if (strcmp(cmd, "ota_data") == 0) {
+            int pack = doc["data"]["pack"];
             const char* b64 = doc["data"]["bin"];
-            if (b64) {
+            if (b64 && pack > 0) {
                 // Передаём ТОЛЬКО base64 строку в OTA Task (он сам декодирует)
                 DataRouter::getInstance().publishString(TOPIC_OTA_CHUNK, b64);
             }
+            // ack_id — БЕЗУСЛОВНЫЙ ответ, не ждём OTA
+            JsonDocument ack;
+            ack["ack_id"] = lastMsgId;
+            publishOutgoing(ack);
             continue;
         }
 

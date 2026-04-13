@@ -257,7 +257,9 @@ bool DataRouter::publishPacket(Topic topic, const void* data, size_t len) {
 // =============================================================================
 
 bool DataRouter::publishString(Topic topic, const char* str) {
-    return _dispatch(topic, str, strlen(str));
+    // Для строковых топиков копируем с нуль-терминатором
+    size_t len = strlen(str) + 1;  // +1 для '\0'
+    return _dispatch(topic, str, len);
 }
 
 // =============================================================================
