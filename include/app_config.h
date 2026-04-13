@@ -39,13 +39,13 @@
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
 // MINOR (8) — OTA Task + BT transport оптимизация
-// BUILD (5) — OTA: retry ack_id on duplicate ota_update, SerialBT mutex
+// BUILD (6) — OTA через DataRouter: убран btSend, убран мьютекс
 //
 #define FW_VERSION_MAJOR 6
 #define FW_VERSION_MINOR 8
-#define FW_VERSION_BUILD 5
-#define FW_VERSION_STR   "6.8.5"
-#define FW_VERSION_NOTE  "OTA: ack_id retry + SerialBT mutex (no race)"
+#define FW_VERSION_BUILD 6
+#define FW_VERSION_STR   "6.8.6"
+#define FW_VERSION_NOTE  "OTA via DataRouter — no btSend, no mutex"
 
 // =============================================================================
 // Аппаратные пины

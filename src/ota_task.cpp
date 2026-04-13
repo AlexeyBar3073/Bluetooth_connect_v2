@@ -7,9 +7,9 @@
 //   OTA Task подписывается на TOPIC_CMD и TOPIC_OTA_CHUNK
 //   Принимает чанки → декодирует base64 → пишет во flash
 //   При ota_end → Update.end() → ESP.restart()
-//   При ошибке → отправка ota_error на Android
+//   При ошибке → публикация ota_error в TOPIC_MSG_OUTGOING (через DataRouter)
 //
-// ВЕРСИЯ: 6.6.0 — OTA Task (специфическая задача, msg_id/ack_id гарантия)
+// ВЕРСИЯ: 6.8.6 — OTA через DataRouter (без btSend, без мьютексов)
 // -----------------------------------------------------------------------------
 
 #include "ota_task.h"
@@ -17,7 +17,6 @@
 #include "topics.h"
 #include "commands.h"
 #include "app_config.h"
-#include "bt_transport.h"
 #include <Update.h>
 #include <ArduinoJson.h>
 
@@ -82,6 +81,14 @@ bool otaIsInProgress() {
 }
 
 // =============================================================================
+// otaSend — публикация в шину (через DataRouter → BT Transport → Android)
+// =============================================================================
+
+static void otaSend(const char* json) {
+    DataRouter::getInstance().publishString(TOPIC_MSG_OUTGOING, json);
+}
+
+// =============================================================================
 // sendOtaError — отправка сообщения об ошибке на Android
 // =============================================================================
 
@@ -91,7 +98,7 @@ static void sendOtaError(const char* reason) {
     doc["ota_error"] = reason;
     char buf[128];
     serializeJson(doc, buf, sizeof(buf));
-    btSend(buf);
+    otaSend(buf);
 }
 
 // =============================================================================
@@ -107,7 +114,7 @@ static void sendOtaInit(int chunkSize, int count, int ackId) {
     init["count"] = count;
     char buf[128];
     serializeJson(doc, buf, sizeof(buf));
-    btSend(buf);
+    otaSend(buf);
 }
 
 // =============================================================================
@@ -138,7 +145,7 @@ static bool processChunk(const char* jsonStr) {
         ack["ack_id"] = doc["ack_id"];
         char buf[64];
         serializeJson(ack, buf, sizeof(buf));
-        btSend(buf);
+        otaSend(buf);
         return true;
     }
 
@@ -164,7 +171,7 @@ static bool processChunk(const char* jsonStr) {
     ack["ack_id"] = doc["ack_id"];
     char buf[64];
     serializeJson(ack, buf, sizeof(buf));
-    btSend(buf);
+    otaSend(buf);
 
     expectedPack++;
 

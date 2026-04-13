@@ -11,7 +11,7 @@
 // Ключевой принцип: RX имеет приоритет над парсингом. Цикл обработки
 // ограничен PARSE_CHUNK_SIZE, чтобы быстро возвращаться к SerialBT.read().
 //
-// ВЕРСИЯ: 6.8.1 — Chunked processing, setRxBufferSize(16KB)
+// ВЕРСИЯ: 6.8.6 — Без мьютексов: весь TX через DataRouter (TOPIC_MSG_OUTGOING)
 // -----------------------------------------------------------------------------
 
 #include "bt_transport.h"
@@ -70,10 +70,6 @@ static bool            isRunningFlag = false;
 static unsigned long   lastHeartbeat = 0;
 static QueueHandle_t   txQueue = NULL;
 
-// Мьютекс для защиты SerialBT (btSend + btTransportTask — разные потоки)
-static StaticSemaphore_t sbbMutexBuf;
-static SemaphoreHandle_t serialBtMutex = NULL;
-
 // =============================================================================
 // btTransportTask — одна задача, но с chunked processing
 // =============================================================================
@@ -86,11 +82,6 @@ void btTransportTask(void* parameter) {
     // Исходящие данные (OVERWRITE — не блокируем отправку)
     txQueue = xQueueCreate(1, 512);
     dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::OVERWRITE);
-
-    // Мьютекс для SerialBT (создаём один раз)
-    if (!serialBtMutex) {
-        serialBtMutex = xSemaphoreCreateMutexStatic(&sbbMutexBuf);
-    }
 
     // Временный буфер для чтения из BT
     uint8_t temp[512];
@@ -161,11 +152,8 @@ void btTransportTask(void* parameter) {
         if (isConnected && txQueue) {
             char txBuffer[512];
             if (xQueueReceive(txQueue, txBuffer, 0) == pdTRUE) {
-                if (xSemaphoreTake(serialBtMutex, portMAX_DELAY) == pdTRUE) {
-                    SerialBT.print(txBuffer);
-                    SerialBT.print('\n');
-                    xSemaphoreGive(serialBtMutex);
-                }
+                SerialBT.print(txBuffer);
+                SerialBT.print('\n');
             }
         }
 
@@ -216,15 +204,3 @@ void btTransportStop() {
 }
 
 bool btIsConnected() { return SerialBT.hasClient(); }
-
-bool btSend(const char* data) {
-    if (!SerialBT.hasClient()) return false;
-    bool result = false;
-    if (serialBtMutex && xSemaphoreTake(serialBtMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        size_t len = SerialBT.print(data);
-        if (len > 0) len += SerialBT.print('\n');
-        result = (len > 0);
-        xSemaphoreGive(serialBtMutex);
-    }
-    return result;
-}
