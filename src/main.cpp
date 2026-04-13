@@ -29,8 +29,8 @@ extern void realEngineStart();    extern void realEngineStop();    extern bool r
 extern void oledStart();          extern void oledStop();          extern bool oledIsRunning();
 #endif
 
-// OTA статус (из bt_transport.cpp)
-extern bool otaIsActive();
+// OTA Task
+extern bool otaIsInProgress();
 
 static void restartSimulator()   { simulatorStop();  delay(100); simulatorStart(); }
 static void restartStorage()     { storageStop();    delay(100); storageStart(); }
@@ -130,7 +130,7 @@ void loop() {
         lastCheck = now;
 
         // НЕ перезапускать задачи если OTA активен!
-        if (otaIsActive()) {
+        if (otaIsInProgress()) {
             vTaskDelay(50 / portTICK_PERIOD_MS);
             return;
         }

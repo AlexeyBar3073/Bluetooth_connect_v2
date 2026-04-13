@@ -1,6 +1,6 @@
 # extra_script.py — Переименование firmware.bin после сборки
-# Формат: BK_V2_<VERSION>_<ENV>.bin
-# Пример: BK_V2_6.4.0_release.bin
+# Формат: firmCar_<VERSION>.bin
+# Пример: firmCar_6_6_0.bin
 
 Import("env")
 import os
@@ -10,7 +10,7 @@ import re
 def rename_firmware(source, target, env):
     # Получаем путь к firmware.bin
     firmware_path = os.path.join(env.get("PROJECT_BUILD_DIR"), env.get("PIOENV"), "firmware.bin")
-    
+
     # Извлекаем версию из app_config.h напрямую
     version = "unknown"
     config_path = os.path.join(env.get("PROJECT_DIR"), "include", "app_config.h")
@@ -19,13 +19,12 @@ def rename_firmware(source, target, env):
             content = f.read()
             match = re.search(r'#define\s+FW_VERSION_STR\s+"([^"]+)"', content)
             if match:
-                version = match.group(1)
-    
+                version = match.group(1).replace('.', '_')
+
     # Формируем новое имя
-    env_name = env.get("PIOENV", "unknown")
-    new_name = f"BK_V2_{version}_{env_name}.bin"
+    new_name = f"firmCar_{version}.bin"
     new_path = os.path.join(env.get("PROJECT_BUILD_DIR"), env.get("PIOENV"), new_name)
-    
+
     # Копируем с новым именем
     if os.path.exists(firmware_path):
         shutil.copy2(firmware_path, new_path)

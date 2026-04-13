@@ -1,34 +1,29 @@
 // -----------------------------------------------------------------------------
 // bt_transport.cpp
-// Транспортный уровень Bluetooth Classic (SPP) + OTA обновление прошивки.
+// Транспортный уровень Bluetooth Classic (SPP).
 //
-// Режимы работы:
-//   1. Обычный — JSON команды, телеметрия
-//   2. OTA — приём прошивки чанками, запись в flash
+// Единственная задача: приём байт от Android → публикация в TOPIC_MSG_INCOMING,
+// приём из TOPIC_MSG_OUTGOING → отправка байт в Android.
+// Не знает про телеметрию, команды, OTA.
 //
-// ВЕРСИЯ: 6.4.0 — OTA через Bluetooth Serial
+// ВЕРСИЯ: 6.6.0 — Чистый транспорт (без OTA)
 // -----------------------------------------------------------------------------
 
 #include "bt_transport.h"
 #include "data_router.h"
 #include "topics.h"
-#include "commands.h"
 #include <BluetoothSerial.h>
 
-BluetoothSerial SerialBT;  // Глобальный (не static) — используется в ota_handler.cpp
+static BluetoothSerial SerialBT;  // Локальный — только для транспорта
 
 static TaskHandle_t    btTaskHandle = NULL;
 static bool            wasConnected = false;
 static bool            isRunningFlag = false;
 static unsigned long   lastHeartbeat = 0;
-
-// --- Режим OTA ---
-static bool            otaMode = false;
-static char            rxBuffer[512];
+static char            rxBuffer[256];
 
 // --- Очереди (создаются модулем, регистрируются в DataRouter) ---
 static QueueHandle_t   txQueue = NULL;       // Входящий JSON от Android → BT → шина
-static QueueHandle_t   cmdQueue = NULL;      // Команды из шины (OTA)
 
 // =============================================================================
 // btTransportTask — Задача
@@ -43,27 +38,12 @@ void btTransportTask(void* parameter) {
     txQueue = xQueueCreate(1, 512);  // 1 слот × 512 байт (полный JSON)
     dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::OVERWRITE);
 
-    // Подписка на команды (OTA)
-    cmdQueue = xQueueCreate(5, sizeof(uint8_t));
-    dr.subscribe(TOPIC_CMD, cmdQueue, QueuePolicy::FIFO_DROP);
-
 #if DEBUG_LOG
-    Serial.println("[BT Transport] Task running (DataRouter-based + OTA)");
+    Serial.println("[BT Transport] Task running (DataRouter-based)");
 #endif
 
     while (1) {
         lastHeartbeat = millis();
-
-        // --- Проверка команд из шины (OTA) ---
-        if (cmdQueue) {
-            uint8_t cmd;
-            while (xQueueReceive(cmdQueue, &cmd, 0) == pdTRUE) {
-                if ((Command)cmd == CMD_ENTER_OTA_MODE) {
-                    // Старый бинарный OTA больше не используется
-                    // Всё через JSON в Protocol
-                }
-            }
-        }
 
         // --- Статус подключения ---
         bool isConnected = SerialBT.hasClient();
@@ -75,7 +55,7 @@ void btTransportTask(void* parameter) {
 #endif
         }
 
-        // --- Обычный режим: RX ---
+        // --- RX: Android → TOPIC_MSG_INCOMING ---
         if (SerialBT.available()) {
             int len = SerialBT.readBytesUntil('\n', rxBuffer, sizeof(rxBuffer) - 1);
             rxBuffer[len] = '\0';
@@ -90,7 +70,7 @@ void btTransportTask(void* parameter) {
             }
         }
 
-        // --- Обычный режим: TX ---
+        // --- TX: TOPIC_MSG_OUTGOING → Android ---
         if (SerialBT.hasClient()) {
             char txBuffer[512];
             if (txQueue && xQueueReceive(txQueue, txBuffer, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -158,7 +138,7 @@ void btTransportStart(const char* deviceName) {
     wasConnected = SerialBT.hasClient();
     DataRouter::getInstance().publish(TOPIC_TRANSPORT_STATUS, wasConnected);
 
-    // Ядро 1 — BT_Transport (Bluetooth communication + OTA)
+    // Ядро 1 — BT_Transport (Bluetooth communication)
     xTaskCreatePinnedToCore(btTransportTask, "BT_Transport", 4096, NULL, 2, &btTaskHandle, 1);
 }
 
@@ -174,5 +154,7 @@ void btTransportStop() {
 bool btIsConnected() { return SerialBT.hasClient(); }
 bool btSend(const char* data) {
     if (!SerialBT.hasClient()) return false;
-    return SerialBT.print(data) > 0;
+    size_t len = SerialBT.print(data);
+    if (len > 0) len += SerialBT.println();  // добавляем \n
+    return len > 0;
 }

@@ -15,7 +15,4 @@ void btTransportStop();
 bool btIsConnected();
 bool btSend(const char* data);  // Отправить строку напрямую через SPP
 
-// OTA status (реализация в ota_handler.cpp)
-bool otaIsActive();
-
 #endif // BT_TRANSPORT_H

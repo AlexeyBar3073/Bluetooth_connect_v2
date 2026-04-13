@@ -25,7 +25,7 @@
 //   - Забывать обновлять AGENTS.md при изменении версии
 //   - Устанавливать MAJOR=0 для продакшн-версии
 //
-// ВЕРСИЯ: 6.3.0 — MAJOR: RMT + PCNT (аппаратные драйверы ESP-IDF)
+// ВЕРСИЯ: 6.6.0 — OTA Task (специфическая задача, msg_id/ack_id гарантия)
 // -----------------------------------------------------------------------------
 
 #ifndef APP_CONFIG_H
@@ -38,14 +38,14 @@
 // Формат: MAJOR.MINOR.BUILD
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
-// MINOR (4) — OTA обновление прошивки + восстановление архитектуры
-// BUILD (1) — Версия и имя файла прошивки
+// MINOR (6) — OTA Task (поднимается только для приёма прошивки)
+// BUILD (0) — Версия и имя файла прошивки
 //
 #define FW_VERSION_MAJOR 6
-#define FW_VERSION_MINOR 5
+#define FW_VERSION_MINOR 6
 #define FW_VERSION_BUILD 0
-#define FW_VERSION_STR   "6.5.0"
-#define FW_VERSION_NOTE  "OTA Android test"
+#define FW_VERSION_STR   "6.6.0"
+#define FW_VERSION_NOTE  "OTA Task architecture"
 
 // =============================================================================
 // Аппаратные пины

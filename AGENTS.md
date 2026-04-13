@@ -1,8 +1,8 @@
 # AGENTS.md — Правила работы с проектом Bluetooth_connect_v2
 
-> **Последнее обновление:** 2026-04-10
-> **Текущая версия:** 6.2.1 (build 1)
-> **Заметка:** FIX: калибровка датчика скорости через Android
+> **Последнее обновление:** 2026-04-13
+> **Текущая версия:** 6.6.0 (build 0)
+> **Заметка:** OTA Task architecture
 
 ---
 
@@ -87,7 +87,7 @@
 - **Нельзя:** вызывать callback напрямую из publish, использовать String, блокировать publish()
 
 ### Topics (topics.h)
-- **Роль:** Реестр тем шины данных (9 топиков)
+- **Роль:** Реестр тем шины данных (10 топиков)
 - **Пакетные топики (0x01–0x0F):**
   - `TOPIC_ENGINE_PACK` (0x01) — EnginePack (FAST, 100 мс)
   - `TOPIC_TRIP_PACK` (0x02) — TripPack (TRIP, 1 сек)
@@ -98,7 +98,7 @@
   - `TOPIC_MSG_INCOMING` (0xF1) — JSON от Android
   - `TOPIC_MSG_OUTGOING` (0xF2) — JSON на Android
   - `TOPIC_TRANSPORT_STATUS` (0xF3) — статус Bluetooth
-  - `TOPIC_NOT_FUEL` (0xF4) — датчик топлива отсутствует
+  - `TOPIC_OTA_CHUNK` (0xF7) — данные OTA-обновления (JSON {"pack":N,"bin":"<base64>"})
 - **Нельзя:** менять числовые значения топиков, удалять топики
 
 ### Packets (common/packets.h)
@@ -110,8 +110,8 @@
 - **Нельзя:** менять порядок полей, удалять поля, убирать #pragma pack
 
 ### Commands (common/commands.h)
-- **Роль:** Типобезопасные команды (13 шт)
-- **Enum Command:** CMD_NONE, CMD_RESET_TRIP_A, CMD_RESET_TRIP_B, CMD_RESET_AVG, CMD_FULL_TANK, CMD_CORRECT_ODO, CMD_GET_CFG, CMD_SET_CFG, CMD_KL_GET_DTC, CMD_KL_CLEAR_DTC, CMD_KL_RESET_ADAPT, CMD_KL_PUMP_ATF, CMD_KL_DETECT_PROTO
+- **Роль:** Типобезопасные команды (16 шт)
+- **Enum Command:** CMD_NONE, CMD_RESET_TRIP_A, CMD_RESET_TRIP_B, CMD_RESET_AVG, CMD_FULL_TANK, CMD_CORRECT_ODO, CMD_GET_CFG, CMD_SET_CFG, CMD_KL_GET_DTC, CMD_KL_CLEAR_DTC, CMD_KL_RESET_ADAPT, CMD_KL_PUMP_ATF, CMD_KL_DETECT_PROTO, CMD_CALIBRATE_SPEED, CMD_CALIBRATE_INJECTOR, CMD_CALIBRATE_DEADTIME, CMD_OTA_END
 - **Типизированные пакеты:** EnginePack, TripPack, ServicePack, SettingsPack, KlinePack, ClimatePack
 - **Команды:** uint8_t (enum Command)
 - **Сообщения:** char[] (JSON строки)
@@ -148,11 +148,27 @@
 - **Нельзя:** блокировать задачу >10 мс, использовать String для JSON
 
 ### BT Transport (bt_transport.cpp) — BLUETOOTH SPP
-- **Роль:** «Труба» SerialBT ↔ DataBus
+- **Роль:** «Труба» SerialBT ↔ DataBus. Не знает про телеметрию, команды, OTA.
 - **RX:** SerialBT → TOPIC_MSG_INCOMING
 - **TX:** TOPIC_MSG_OUTGOING → SerialBT
 - **Статус:** TOPIC_TRANSPORT_STATUS при изменении
-- **Нельзя:** парсить JSON, блокировать >10 мс
+- **Нельзя:** парсить JSON, блокировать >10 мс, иметь глобальные зависимости
+
+### OTA Task (ota_task.cpp) — ОБНОВЛЕНИЕ ПРОШИВКИ
+- **Роль:** Специфическая задача, поднимается ТОЛЬКО при получении команды `ota_update` от Android.
+- **Жизненный цикл:** `otaTaskStart(size)` → приём чанков → `Update.end()` → `ESP.restart()` → задача удаляется
+- **Подписан на:** TOPIC_CMD (CMD_OTA_END), TOPIC_OTA_CHUNK (данные base64)
+- **Публикует:** ota_error на Android (через btSend) при ошибке
+- **Протокол OTA:**
+  1. Android → `{"command":"ota_update","size":<firmware_size>}`
+  2. Protocol → останавливает телеметрию, вызывает `otaTaskStart()`
+  3. OTA → Android: `{"ota_init":{"size":<chunk_size>,"count":<chunks>}}`
+  4. Android → `{"command":"ota_data","data":{"pack":N,"bin":"<base64>"}}` (msg_id/ack_id гарантия)
+  5. Protocol → TOPIC_OTA_CHUNK (проверка последовательности pack)
+  6. OTA Task → base64 decode → Update.write()
+  7. Android → `{"command":"ota_end"}` → OTA → Update.end() → ESP.restart()
+- **Параметры:** chunk=256 байт (bin), ~344 символа (base64), max 8192 чанка (~2 МБ)
+- **Нельзя:** работать в обычном режиме, блокировать >10 мс, использовать глобальные переменные OTA в других модулях
 
 ### K-Line (kline_task.cpp) — ДИАГНОСТИКА ЭБУ
 - **Роль:** Опрос ЭБУ по К-Line (симуляция/реальный), автоопределение протокола
@@ -242,6 +258,8 @@ Android ──► SerialBT ──► BT Transport ──publish──► TOPIC_M
 
 | Версия | Дата | Описание |
 |--------|------|----------|
+| **6.6.0** | 2026-04-13 | **MINOR: OTA Task.** Специфическая задача обновления, поднимается только по команде `ota_update`. BT Transport чистый (без OTA). Протокол: ota_update → ota_init → ota_data (msg_id/ack_id) → ota_end → ESP.restart(). TOPIC_OTA_CHUNK, CMD_OTA_END. |
+| **6.5.0** | 2026-04-10 | OTA Android test (устарело — удалено)
 | **6.2.1** | 2026-04-10 | FIX: калибровка датчика скорости. Команды `calibrate_speed_start` / `calibrate_speed_end`, расчёт `pulses_per_meter`, сохранение в NVS через SettingsPack. |
 | **6.2.0** | 2026-04-10 | **MINOR: RealEngine + INA226.** ISR форсунки (GPIO4, CHANGE) + геркон (GPIO13, RISING). INA226: бортсеть + поплавок-реостат. DEBUG_LOG, OLED_ENABLED, REAL_ENGINE_ENABLED — переключатели через platformio.ini. |
 | **6.1.1** | 2026-04-10 | FIX: txBuffer overflow — очередь BT Transport 512B, но локальный буфер был 256B → краш при `get_cfg`. |

@@ -133,6 +133,12 @@ enum Topic : uint8_t {
     // Кто подписан: RealEngine Task (расчёт pulses_per_meter).
     // Политика: QUEUE_OVERWRITE, depth=1.
 
+    TOPIC_OTA_CHUNK        = 0xF7,
+    // Данные OTA-обновления (string — JSON {"pack":N,"bin":"<base64>"}).
+    // Кто публикует: Protocol Task (приём ota_data от Android, проверка seq).
+    // Кто подписан: OTA Task (декодирование base64 → запись во flash).
+    // Политика: QUEUE_FIFO_DROP, depth=1 (всегда актуальный чанк).
+
     TOPIC_COUNT  // Общее количество топиков (для массивов, циклов)
 };
 

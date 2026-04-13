@@ -19,7 +19,7 @@
 #include "packets.h"
 #include "commands.h"
 #include "bt_transport.h"
-#include "ota_handler.h"
+#include "ota_task.h"
 #include "app_config.h"
 #include <ArduinoJson.h>
 
@@ -182,10 +182,9 @@ static void injectAckId(JsonDocument& doc) {
 
 static void publishOutgoing(JsonDocument& doc) {
     serializeJson(doc, outBuffer, sizeof(outBuffer));
-    strlcat(outBuffer, "\n", sizeof(outBuffer));
     outBuffer[sizeof(outBuffer) - 1] = '\0';
 
-    // Отправляем напрямую через BT
+    // Отправляем напрямую через BT (\n добавляется в btSend)
     btSend(outBuffer);
 
     // Все JSON дублируем в шину (для отладки)
@@ -211,6 +210,11 @@ static void processIncoming(QueueHandle_t q) {
         const char* cmd = doc["command"];
         if (!cmd) cmd = doc["cmd"];
         if (!cmd) continue;
+
+        // --- Лог каждой команды (unconditional для отладки OTA) ---
+        if (strstr(cmd, "ota") != NULL) {
+            Serial.printf("[Proto] RX OTA command: '%s'\n", cmd);
+        }
 
         // Извлекаем msg_id
         JsonVariant msgIdVar = doc["msg_id"];
@@ -260,56 +264,50 @@ static void processIncoming(QueueHandle_t q) {
             continue;
         }
 
-        // --- enter_ota_mode — войти в режим OTA обновления (устаревший, бинарный) ---
-        if (strcmp(cmd, "enter_ota_mode") == 0) {
-            DataRouter::getInstance().publish(TOPIC_CMD, CMD_ENTER_OTA_MODE);
-            JsonDocument resp;
-            injectAckId(resp);
-            resp["status"] = "ota_entering";
-            publishOutgoing(resp);
-            continue;
-        }
-
-        // --- ota_start — начать OTA обновление (JSON) ---
-        if (strcmp(cmd, "ota_start") == 0) {
-            int fwSize = doc["data"]["size"];
+        // --- ota_update — начать OTA обновление ---
+        if (strcmp(cmd, "ota_update") == 0) {
+            int fwSize = doc["size"];
+            Serial.printf("[Proto] ota_update: size=%d, ack_id=%d\n", fwSize, lastMsgId);
             if (fwSize > 0) {
-                bool ok = otaBegin(fwSize);
+                // Останавливаем телеметрию
+                isStreamingActive = false;
+                Serial.println("[Proto] Telemetry stopped, calling otaTaskStart...");
+
+                // OTA Task сам отправит ota_init + ack_id одним пакетом
+                otaTaskStart((size_t)fwSize, lastMsgId);
+            } else {
+                Serial.println("[Proto] ota_update: INVALID SIZE");
                 JsonDocument resp;
-                injectAckId(resp);
-                if (!ok) resp["ota"] = "error";
+                resp["error"] = "invalid_size";
                 publishOutgoing(resp);
             }
             continue;
         }
 
-        // --- ota_data — порция данных прошивки (JSON) ---
+        // --- ota_data — порция данных прошивки → TOPIC_OTA_CHUNK ---
         if (strcmp(cmd, "ota_data") == 0) {
             int pack = doc["data"]["pack"];
             const char* b64 = doc["data"]["bin"];
             if (b64 && pack > 0) {
-                bool ok = otaWriteChunk(b64);
-                JsonDocument resp;
-                injectAckId(resp);
-                resp["ota_read"] = pack;
-                if (!ok) resp["ota"] = "error";
-                publishOutgoing(resp);
+                // Пересылаем JSON {"pack":N,"bin":"..."} в OTA Task
+                JsonDocument chunkDoc;
+                chunkDoc["pack"] = pack;
+                chunkDoc["bin"] = b64;
+                char chunkBuf[OTA_CHUNK_B64_SIZE + 64];
+                size_t len = serializeJson(chunkDoc, chunkBuf, sizeof(chunkBuf));
+                DataRouter::getInstance().publishString(TOPIC_OTA_CHUNK, chunkBuf);
             }
             continue;
         }
 
-        // --- ota_end — завершение OTA ---
+        // --- ota_end — завершение OTA → команда в OTA Task ---
         if (strcmp(cmd, "ota_end") == 0) {
-            bool ok = otaFinalize();
+            Serial.println("[Proto] ota_end received, sending CMD_OTA_END");
+            DataRouter::getInstance().publish(TOPIC_CMD, CMD_OTA_END);
             JsonDocument resp;
             injectAckId(resp);
-            if (!ok) resp["ota"] = "error";
+            resp["status"] = "ota_finalizing";
             publishOutgoing(resp);
-            if (ok) {
-                Serial.println("[Protocol] OTA complete. Rebooting...");
-                delay(500);
-                ESP.restart();
-            }
             continue;
         }
 
