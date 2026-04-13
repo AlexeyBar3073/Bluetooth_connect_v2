@@ -28,8 +28,8 @@ static BluetoothSerial SerialBT;
 #define RX_RING_SIZE  8192
 
 static uint8_t rxRing[RX_RING_SIZE];
-static volatile size_t rxHead = 0;
-static volatile size_t rxTail = 0;
+static size_t rxHead = 0;
+static size_t rxTail = 0;
 
 inline void rbPush(uint8_t c) {
     size_t next = (rxHead + 1) % RX_RING_SIZE;
@@ -58,7 +58,7 @@ inline bool rbPop(uint8_t &c) {
 // Chunked processing — макс. байт за один проход парсера
 // =============================================================================
 
-#define PARSE_CHUNK_SIZE 256
+#define PARSE_CHUNK_SIZE 1024
 
 // =============================================================================
 // Состояние задачи
@@ -87,7 +87,8 @@ void btTransportTask(void* parameter) {
     uint8_t temp[512];
 
     // Буфер для сборки строки (статический — не на стеке)
-    static char lineBuffer[1024];
+    // 4096 — достаточно для OTA-чанка JSON (~1420 байт при bin=1368 base64)
+    static char lineBuffer[4096];
     static size_t linePos = 0;
 
 #if DEBUG_LOG
@@ -157,7 +158,7 @@ void btTransportTask(void* parameter) {
         }
 
         // Пауза 1 тик — даём другим задачам поработать
-        vTaskDelay(1 / portTICK_PERIOD_MS);
+        vTaskDelay(1);
     }
 }
 

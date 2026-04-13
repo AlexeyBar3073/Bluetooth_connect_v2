@@ -193,7 +193,9 @@ static void publishOutgoing(JsonDocument& doc) {
 // =============================================================================
 
 static void processIncoming(QueueHandle_t q) {
-    char rxBuffer[512];
+    // Буфер согласован с itemSize incomingQ (2048 байт)
+    // OTA-чанк JSON ~1420 байт (bin=1368 base64 + pack + ack_id)
+    char rxBuffer[2048];
     while (xQueueReceive(q, rxBuffer, 0) == pdTRUE) {
 
         JsonDocument doc;
