@@ -39,13 +39,13 @@
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
 // MINOR (8) — OTA Task + BT transport оптимизация
-// BUILD (2) — BT Task: vTaskDelay(1) — не голодает другие задачи
+// BUILD (3) — Buffer overflow fix, busy-wait fix, OTA pipeline alignment
 //
 #define FW_VERSION_MAJOR 6
 #define FW_VERSION_MINOR 8
-#define FW_VERSION_BUILD 2
-#define FW_VERSION_STR   "6.8.2"
-#define FW_VERSION_NOTE  "BT: vTaskDelay(1) — fix task starvation"
+#define FW_VERSION_BUILD 3
+#define FW_VERSION_STR   "6.8.3"
+#define FW_VERSION_NOTE  "OTA: buffer alignment, vTaskDelay(1), PARSE_CHUNK=1024"
 
 // =============================================================================
 // Аппаратные пины
