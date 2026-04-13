@@ -498,11 +498,12 @@ void protocolTask(void* parameter) {
                 if (otaPack == -1) {
                     // ota_init — OTA Task готова к приёму
                     JsonDocument doc;
+                    doc["ack_id"] = lastMsgId;
                     doc["ota_init"].to<JsonObject>()["size"]  = ota.chunkSize;
                     doc["ota_init"].to<JsonObject>()["count"] = ota.totalChunks;
                     publishOutgoing(doc);
-                    Serial.printf("[Proto] ota_init sent: chunkSize=%d, count=%d\n",
-                                  ota.chunkSize, ota.totalChunks);
+                    Serial.printf("[Proto] ota_init sent: chunkSize=%d, count=%d, ack_id=%d\n",
+                                  ota.chunkSize, ota.totalChunks, lastMsgId);
                 } else if (otaPack > 0) {
                     // Успешная запись чанка — отправляем ack
                     JsonDocument doc;

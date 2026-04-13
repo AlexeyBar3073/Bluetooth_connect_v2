@@ -39,13 +39,13 @@
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
 // MINOR (8) — OTA Task + BT transport оптимизация
-// BUILD (8) — OTA: Protocol НЕ декодирует base64. OTA Task сам декодирует.
+// BUILD (9) — OTA: ota_init включает ack_id
 //
 #define FW_VERSION_MAJOR 6
 #define FW_VERSION_MINOR 8
-#define FW_VERSION_BUILD 8
-#define FW_VERSION_STR   "6.8.8"
-#define FW_VERSION_NOTE  "OTA: base64_decode в OTA Task, Protocol только маршрутизирует"
+#define FW_VERSION_BUILD 9
+#define FW_VERSION_STR   "6.8.9"
+#define FW_VERSION_NOTE  "OTA: ota_init + ack_id"
 
 // =============================================================================
 // Аппаратные пины
