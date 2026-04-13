@@ -70,6 +70,10 @@ static bool            isRunningFlag = false;
 static unsigned long   lastHeartbeat = 0;
 static QueueHandle_t   txQueue = NULL;
 
+// Мьютекс для защиты SerialBT (btSend + btTransportTask — разные потоки)
+static StaticSemaphore_t sbbMutexBuf;
+static SemaphoreHandle_t serialBtMutex = NULL;
+
 // =============================================================================
 // btTransportTask — одна задача, но с chunked processing
 // =============================================================================
@@ -82,6 +86,11 @@ void btTransportTask(void* parameter) {
     // Исходящие данные (OVERWRITE — не блокируем отправку)
     txQueue = xQueueCreate(1, 512);
     dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::OVERWRITE);
+
+    // Мьютекс для SerialBT (создаём один раз)
+    if (!serialBtMutex) {
+        serialBtMutex = xSemaphoreCreateMutexStatic(&sbbMutexBuf);
+    }
 
     // Временный буфер для чтения из BT
     uint8_t temp[512];
@@ -152,8 +161,11 @@ void btTransportTask(void* parameter) {
         if (isConnected && txQueue) {
             char txBuffer[512];
             if (xQueueReceive(txQueue, txBuffer, 0) == pdTRUE) {
-                SerialBT.print(txBuffer);
-                SerialBT.print('\n');
+                if (xSemaphoreTake(serialBtMutex, portMAX_DELAY) == pdTRUE) {
+                    SerialBT.print(txBuffer);
+                    SerialBT.print('\n');
+                    xSemaphoreGive(serialBtMutex);
+                }
             }
         }
 
@@ -207,7 +219,12 @@ bool btIsConnected() { return SerialBT.hasClient(); }
 
 bool btSend(const char* data) {
     if (!SerialBT.hasClient()) return false;
-    size_t len = SerialBT.print(data);
-    if (len > 0) len += SerialBT.print('\n');
-    return len > 0;
+    bool result = false;
+    if (serialBtMutex && xSemaphoreTake(serialBtMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        size_t len = SerialBT.print(data);
+        if (len > 0) len += SerialBT.print('\n');
+        result = (len > 0);
+        xSemaphoreGive(serialBtMutex);
+    }
+    return result;
 }

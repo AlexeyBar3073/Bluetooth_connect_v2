@@ -241,7 +241,12 @@ void otaTask(void* parameter) {
 // =============================================================================
 
 void otaTaskStart(size_t firmwareSize, int ackId) {
-    if (otaTaskHandle) return;  // Уже запущена
+    // Если OTA уже запущена — повторно отправляем ack_id,
+    // чтобы Android получил подтверждение (повторный запрос)
+    if (otaTaskHandle) {
+        sendOtaInit(OTA_CHUNK_BIN_SIZE, totalChunks, ackId);
+        return;
+    }
 
     otaFirmwareSize = firmwareSize;
     otaWritten = 0;

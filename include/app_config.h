@@ -39,13 +39,13 @@
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
 // MINOR (8) — OTA Task + BT transport оптимизация
-// BUILD (3) — Buffer overflow fix, busy-wait fix, OTA pipeline alignment
+// BUILD (5) — OTA: retry ack_id on duplicate ota_update, SerialBT mutex
 //
 #define FW_VERSION_MAJOR 6
 #define FW_VERSION_MINOR 8
-#define FW_VERSION_BUILD 3
-#define FW_VERSION_STR   "6.8.3"
-#define FW_VERSION_NOTE  "OTA: buffer alignment, vTaskDelay(1), PARSE_CHUNK=1024"
+#define FW_VERSION_BUILD 5
+#define FW_VERSION_STR   "6.8.5"
+#define FW_VERSION_NOTE  "OTA: ack_id retry + SerialBT mutex (no race)"
 
 // =============================================================================
 // Аппаратные пины
