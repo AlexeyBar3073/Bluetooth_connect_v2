@@ -257,9 +257,16 @@ bool DataRouter::publishPacket(Topic topic, const void* data, size_t len) {
 // =============================================================================
 
 bool DataRouter::publishString(Topic topic, const char* str) {
-    // Для строковых топиков копируем с нуль-терминатором
-    size_t len = strlen(str) + 1;  // +1 для '\0'
-    return _dispatch(topic, str, len);
+    // Копируем строку в буфер с нуль-паддингом до 2048 байт.
+    // xQueueSend/Overwrite копирует РОВНО itemSize байт, поэтому
+    // нужно чтобы за строкой шли нули, а не мусор памяти.
+    static char txBuf[2048];
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    memset(txBuf, 0, sizeof(txBuf));
+    strlcpy(txBuf, str, sizeof(txBuf));
+    bool result = _dispatch(topic, txBuf, sizeof(txBuf));
+    xSemaphoreGive(_mutex);
+    return result;
 }
 
 // =============================================================================
