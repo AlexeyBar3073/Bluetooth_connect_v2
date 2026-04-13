@@ -132,7 +132,14 @@ static bool processChunk(const char* jsonStr) {
     // Проверка последовательности
     if (pack != expectedPack) {
         Serial.printf("[OTA] Wrong pack: expected %d, got %d — DISCARDED\n", expectedPack, pack);
-        return false;
+        // Повтор предыдущего — отправляем ack чтобы Android двинулся дальше
+        JsonDocument ack;
+        ack["ota_read"] = expectedPack - 1;
+        ack["ack_id"] = doc["ack_id"];
+        char buf[64];
+        serializeJson(ack, buf, sizeof(buf));
+        btSend(buf);
+        return true;
     }
 
     // Декодируем base64
@@ -150,6 +157,15 @@ static bool processChunk(const char* jsonStr) {
     }
 
     otaWritten += written;
+
+    // Отправляем подтверждение Android (ack_id = msg_id входящего сообщения)
+    JsonDocument ack;
+    ack["ota_read"] = pack;
+    ack["ack_id"] = doc["ack_id"];
+    char buf[64];
+    serializeJson(ack, buf, sizeof(buf));
+    btSend(buf);
+
     expectedPack++;
 
     // Лог прогресса каждые 10%
@@ -179,7 +195,7 @@ void otaTask(void* parameter) {
     dr.subscribe(TOPIC_CMD, cmdQ, QueuePolicy::FIFO_DROP);
 
     // Подписка на чанки данных
-    chunkQ = xQueueCreate(1, OTA_CHUNK_B64_SIZE + 64);
+    chunkQ = xQueueCreate(1, OTA_DECODE_BUF_SIZE + 128);
     dr.subscribe(TOPIC_OTA_CHUNK, chunkQ, QueuePolicy::FIFO_DROP);
 
     Serial.printf("[OTA] Task started. Size=%u bytes, chunks=%d\n",
@@ -210,7 +226,7 @@ void otaTask(void* parameter) {
 
         // --- Чанки данных ---
         if (chunkQ) {
-            char chunkBuf[OTA_CHUNK_B64_SIZE + 64];
+            char chunkBuf[OTA_DECODE_BUF_SIZE + 128];
             while (xQueueReceive(chunkQ, chunkBuf, 0) == pdTRUE) {
                 processChunk(chunkBuf);
             }

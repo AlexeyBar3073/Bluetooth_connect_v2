@@ -2,11 +2,16 @@
 // bt_transport.cpp
 // Транспортный уровень Bluetooth Classic (SPP).
 //
+// Архитектура: Bluetooth → RingBuffer → Chunked Parser → DataRouter
+//
 // Единственная задача: приём байт от Android → публикация в TOPIC_MSG_INCOMING,
 // приём из TOPIC_MSG_OUTGOING → отправка байт в Android.
 // Не знает про телеметрию, команды, OTA.
 //
-// ВЕРСИЯ: 6.6.0 — Чистый транспорт (без OTA)
+// Ключевой принцип: RX имеет приоритет над парсингом. Цикл обработки
+// ограничен PARSE_CHUNK_SIZE, чтобы быстро возвращаться к SerialBT.read().
+//
+// ВЕРСИЯ: 6.8.1 — Chunked processing, setRxBufferSize(16KB)
 // -----------------------------------------------------------------------------
 
 #include "bt_transport.h"
@@ -14,19 +19,59 @@
 #include "topics.h"
 #include <BluetoothSerial.h>
 
-static BluetoothSerial SerialBT;  // Локальный — только для транспорта
+static BluetoothSerial SerialBT;
+
+// =============================================================================
+// Ring Buffer — общий, 8KB для burst-proof
+// =============================================================================
+
+#define RX_RING_SIZE  8192
+
+static uint8_t rxRing[RX_RING_SIZE];
+static volatile size_t rxHead = 0;
+static volatile size_t rxTail = 0;
+
+inline void rbPush(uint8_t c) {
+    size_t next = (rxHead + 1) % RX_RING_SIZE;
+    if (next != rxTail) {
+        rxRing[rxHead] = c;
+        rxHead = next;
+    } else {
+        // Переполнение — сдвигаем хвост (перезапись старых данных)
+        rxTail = (rxTail + 1) % RX_RING_SIZE;
+        rxRing[rxHead] = c;
+        rxHead = next;
+#if DEBUG_LOG
+        Serial.println("[BT RX] Ring overflow");
+#endif
+    }
+}
+
+inline bool rbPop(uint8_t &c) {
+    if (rxTail == rxHead) return false;
+    c = rxRing[rxTail];
+    rxTail = (rxTail + 1) % RX_RING_SIZE;
+    return true;
+}
+
+// =============================================================================
+// Chunked processing — макс. байт за один проход парсера
+// =============================================================================
+
+#define PARSE_CHUNK_SIZE 256
+
+// =============================================================================
+// Состояние задачи
+// =============================================================================
 
 static TaskHandle_t    btTaskHandle = NULL;
 static bool            wasConnected = false;
 static bool            isRunningFlag = false;
 static unsigned long   lastHeartbeat = 0;
-static char            rxBuffer[256];
-
-// --- Очереди (создаются модулем, регистрируются в DataRouter) ---
-static QueueHandle_t   txQueue = NULL;       // Входящий JSON от Android → BT → шина
+static QueueHandle_t   txQueue = NULL;
 
 // =============================================================================
-// btTransportTask — Задача
+// btTransportTask — одна задача, но с chunked processing
 // =============================================================================
 
 void btTransportTask(void* parameter) {
@@ -34,80 +79,85 @@ void btTransportTask(void* parameter) {
     isRunningFlag = true;
     DataRouter& dr = DataRouter::getInstance();
 
-    // Создаём очередь для исходящих данных (OVERWRITE, depth=1 — всегда актуальное)
-    txQueue = xQueueCreate(1, 512);  // 1 слот × 512 байт (полный JSON)
+    // Исходящие данные (OVERWRITE — не блокируем отправку)
+    txQueue = xQueueCreate(1, 512);
     dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::OVERWRITE);
 
+    // Временный буфер для чтения из BT
+    uint8_t temp[512];
+
+    // Буфер для сборки строки (статический — не на стеке)
+    static char lineBuffer[1024];
+    static size_t linePos = 0;
+
 #if DEBUG_LOG
-    Serial.println("[BT Transport] Task running (DataRouter-based)");
+    Serial.println("[BT Transport] Task running (chunked RX-first)");
 #endif
 
     while (1) {
         lastHeartbeat = millis();
 
-        // --- Статус подключения ---
+        // --- 1. Статус подключения ---
         bool isConnected = SerialBT.hasClient();
         if (isConnected != wasConnected) {
             wasConnected = isConnected;
             dr.publish(TOPIC_TRANSPORT_STATUS, isConnected);
-#if DEBUG_LOG
-            Serial.printf("[BT Transport] %s\n", isConnected ? "CONNECTED" : "DISCONNECTED");
-#endif
         }
 
-        // --- RX: Android → TOPIC_MSG_INCOMING ---
-        if (SerialBT.available()) {
-            int len = SerialBT.readBytesUntil('\n', rxBuffer, sizeof(rxBuffer) - 1);
-            rxBuffer[len] = '\0';
+        // --- 2. RX: Чтение из Bluetooth (ПРИОРИТЕТ №1) ---
+        if (isConnected && SerialBT.available()) {
+            size_t len = SerialBT.readBytes((char*)temp, sizeof(temp));
+            for (size_t i = 0; i < len; i++) {
+                rbPush(temp[i]);
+            }
+            // Не парсим! Сразу возвращаемся к началу while(1) — читаем дальше.
+        }
 
-            char* start = rxBuffer;
-            while (*start == ' ' || *start == '\r' || *start == '\t') start++;
-            char* end = start + strlen(start) - 1;
-            while (end > start && (*end == ' ' || *end == '\r' || *end == '\t')) *end-- = '\0';
+        // --- 3. Парсинг: порционный (не более PARSE_CHUNK_SIZE за проход) ---
+        int processed = 0;
+        uint8_t c;
 
-            if (strlen(start) > 0) {
-                dr.publishString(TOPIC_MSG_INCOMING, start);
+        while (rbPop(c) && processed < PARSE_CHUNK_SIZE) {
+            processed++;
+
+            if (c == '\r') continue;
+
+            if (c == '\n') {
+                if (linePos > 0) {
+                    lineBuffer[linePos] = '\0';
+
+                    char* start = lineBuffer;
+                    while (*start == ' ' || *start == '\t') start++;
+
+                    if (*start) {
+                        dr.publishString(TOPIC_MSG_INCOMING, start);
+                    }
+
+                    linePos = 0;
+                }
+            } else {
+                if (linePos < sizeof(lineBuffer) - 1) {
+                    lineBuffer[linePos++] = (char)c;
+                } else {
+                    linePos = 0;
+#if DEBUG_LOG
+                    Serial.println("[BT RX] Line buffer overflow");
+#endif
+                }
             }
         }
 
-        // --- TX: TOPIC_MSG_OUTGOING → Android ---
-        if (SerialBT.hasClient()) {
+        // --- 4. TX: TOPIC_MSG_OUTGOING → Android (без ожидания) ---
+        if (isConnected && txQueue) {
             char txBuffer[512];
-            if (txQueue && xQueueReceive(txQueue, txBuffer, pdMS_TO_TICKS(50)) == pdTRUE) {
-                size_t sent = SerialBT.print(txBuffer);
-                if (sent == 0) {
-                    static unsigned long lastCongestionLog = 0;
-                    unsigned long now = millis();
-                    if (now - lastCongestionLog > 5000) {
-                        lastCongestionLog = now;
-#if DEBUG_LOG
-                        Serial.printf("[BT TX] SPP congested! Android не читает (%zu/%zu sent)\n",
-                                      sent, strlen(txBuffer));
-#endif
-                    }
-                }
-                // --- Логирование ack_id ---
-                if (sent > 0) {
-                    static int lastAckId = -1;
-                    static int txCount = 0;
-                    txCount++;
-                    const char* ackPtr = strstr(txBuffer, "\"ack_id\":");
-                    if (ackPtr) {
-                        ackPtr += 9;
-                        int currentAck = atoi(ackPtr);
-                        if (currentAck != lastAckId) {
-                            lastAckId = currentAck;
-#if DEBUG_LOG
-                            Serial.printf("[BT TX] #%d ack_id=%d\n", txCount, lastAckId);
-#endif
-                        }
-                    }
-                }
-                // --- Конец логирования ---
+            if (xQueueReceive(txQueue, txBuffer, 0) == pdTRUE) {
+                SerialBT.print(txBuffer);
+                SerialBT.print('\n');
             }
         }
 
-        vTaskDelay(50 / portTICK_PERIOD_MS);
+        // Пауза 1 тик — даём другим задачам поработать
+        vTaskDelay(1 / portTICK_PERIOD_MS);
     }
 }
 
@@ -131,6 +181,7 @@ void btTransportStart(const char* deviceName) {
         Serial.println("[BT Transport] Init FAILED!");
         return;
     }
+    SerialBT.setTimeout(1);  // 1ms — readBytes не блокируется дольше
 #if DEBUG_LOG
     Serial.printf("[BT Transport] Started: '%s'\n", deviceName);
 #endif
@@ -138,8 +189,8 @@ void btTransportStart(const char* deviceName) {
     wasConnected = SerialBT.hasClient();
     DataRouter::getInstance().publish(TOPIC_TRANSPORT_STATUS, wasConnected);
 
-    // Ядро 1 — BT_Transport (Bluetooth communication)
-    xTaskCreatePinnedToCore(btTransportTask, "BT_Transport", 4096, NULL, 2, &btTaskHandle, 1);
+    // Ядро 1, приоритет 2
+    xTaskCreatePinnedToCore(btTransportTask, "BT_Transport", 8192, NULL, 2, &btTaskHandle, 1);
 }
 
 void btTransportStop() {
@@ -152,9 +203,10 @@ void btTransportStop() {
 }
 
 bool btIsConnected() { return SerialBT.hasClient(); }
+
 bool btSend(const char* data) {
     if (!SerialBT.hasClient()) return false;
     size_t len = SerialBT.print(data);
-    if (len > 0) len += SerialBT.println();  // добавляем \n
+    if (len > 0) len += SerialBT.print('\n');
     return len > 0;
 }

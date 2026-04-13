@@ -38,14 +38,14 @@
 // Формат: MAJOR.MINOR.BUILD
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
-// MINOR (6) — OTA Task (поднимается только для приёма прошивки)
-// BUILD (0) — Версия и имя файла прошивки
+// MINOR (8) — OTA Task + BT transport оптимизация
+// BUILD (2) — BT Task: vTaskDelay(1) — не голодает другие задачи
 //
 #define FW_VERSION_MAJOR 6
-#define FW_VERSION_MINOR 6
-#define FW_VERSION_BUILD 0
-#define FW_VERSION_STR   "6.6.0"
-#define FW_VERSION_NOTE  "OTA Task architecture"
+#define FW_VERSION_MINOR 8
+#define FW_VERSION_BUILD 2
+#define FW_VERSION_STR   "6.8.2"
+#define FW_VERSION_NOTE  "BT: vTaskDelay(1) — fix task starvation"
 
 // =============================================================================
 // Аппаратные пины

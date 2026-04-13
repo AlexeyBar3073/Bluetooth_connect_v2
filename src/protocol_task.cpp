@@ -177,17 +177,14 @@ static void injectAckId(JsonDocument& doc) {
 }
 
 // =============================================================================
-// publishOutgoing: Сериализует JSON и отправляет через BT
+// publishOutgoing: Сериализует JSON и публикует в шину → BT Transport
 // =============================================================================
 
 static void publishOutgoing(JsonDocument& doc) {
     serializeJson(doc, outBuffer, sizeof(outBuffer));
     outBuffer[sizeof(outBuffer) - 1] = '\0';
 
-    // Отправляем напрямую через BT (\n добавляется в btSend)
-    btSend(outBuffer);
-
-    // Все JSON дублируем в шину (для отладки)
+    // Только в шину — BT Transport сам отправит через TX-очередь
     DataRouter::getInstance().publishString(TOPIC_MSG_OUTGOING, outBuffer);
 }
 
@@ -196,11 +193,12 @@ static void publishOutgoing(JsonDocument& doc) {
 // =============================================================================
 
 static void processIncoming(QueueHandle_t q) {
-    char rxBuffer[256];
+    char rxBuffer[512];
     while (xQueueReceive(q, rxBuffer, 0) == pdTRUE) {
 
         JsonDocument doc;
         if (deserializeJson(doc, rxBuffer)) {
+            Serial.printf("[Proto] JSON parse error: %s\n", rxBuffer);
             JsonDocument err;
             err["error"] = "Invalid JSON";
             publishOutgoing(err);
@@ -289,12 +287,13 @@ static void processIncoming(QueueHandle_t q) {
             int pack = doc["data"]["pack"];
             const char* b64 = doc["data"]["bin"];
             if (b64 && pack > 0) {
-                // Пересылаем JSON {"pack":N,"bin":"..."} в OTA Task
+                // Пересылаем в OTA Task, включая ack_id (msg_id входящего сообщения)
                 JsonDocument chunkDoc;
                 chunkDoc["pack"] = pack;
                 chunkDoc["bin"] = b64;
-                char chunkBuf[OTA_CHUNK_B64_SIZE + 64];
-                size_t len = serializeJson(chunkDoc, chunkBuf, sizeof(chunkBuf));
+                chunkDoc["ack_id"] = lastMsgId;
+                char chunkBuf[OTA_DECODE_BUF_SIZE + 128];
+                serializeJson(chunkDoc, chunkBuf, sizeof(chunkBuf));
                 DataRouter::getInstance().publishString(TOPIC_OTA_CHUNK, chunkBuf);
             }
             continue;
@@ -303,11 +302,15 @@ static void processIncoming(QueueHandle_t q) {
         // --- ota_end — завершение OTA → команда в OTA Task ---
         if (strcmp(cmd, "ota_end") == 0) {
             Serial.println("[Proto] ota_end received, sending CMD_OTA_END");
-            DataRouter::getInstance().publish(TOPIC_CMD, CMD_OTA_END);
+
+            // Сразу отвечаем Android — он открывает диалог ожидания перезагрузки
             JsonDocument resp;
             injectAckId(resp);
-            resp["status"] = "ota_finalizing";
+            resp["ota_restart"] = 1;
             publishOutgoing(resp);
+
+            // Затем финализация OTA Task
+            DataRouter::getInstance().publish(TOPIC_CMD, CMD_OTA_END);
             continue;
         }
 
@@ -457,7 +460,7 @@ void protocolTask(void* parameter) {
     dr.subscribe(TOPIC_CLIMATE_PACK,  climateQ,  QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE, true);
 
-    QueueHandle_t incomingQ = xQueueCreate(1, 512);
+    QueueHandle_t incomingQ = xQueueCreate(1, 2048);
     dr.subscribe(TOPIC_MSG_INCOMING, incomingQ, QueuePolicy::OVERWRITE);
 
 #if DEBUG_LOG
