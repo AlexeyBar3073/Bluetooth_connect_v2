@@ -110,7 +110,7 @@ void btTransportTask(void* parameter) {
             for (size_t i = 0; i < len; i++) {
                 rbPush(temp[i]);
             }
-            // Не парсим! Сразу возвращаемся к началу while(1) — читаем дальше.
+            // Сразу возвращаемся к началу while(1) — читаем дальше
         }
 
         // --- 3. Парсинг: порционный (не более PARSE_CHUNK_SIZE за проход) ---
