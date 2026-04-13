@@ -4,12 +4,15 @@
 //
 // Жизненный цикл:
 //   otaTaskStart(firmwareSize)  → создаёт задачу, инициализирует Update
-//   OTA Task подписывается на TOPIC_CMD и TOPIC_OTA_CHUNK
-//   Принимает чанки → декодирует base64 → пишет во flash
-//   При ota_end → Update.end() → ESP.restart()
-//   При ошибке → публикация ota_error в TOPIC_MSG_OUTGOING (через DataRouter)
+//   OTA Task подписывается на TOPIC_OTA_CHUNK (OtaChunkPack — бинарные данные)
+//   Принимает чанки → пишет во flash → публикует pack номер в TOPIC_OTA_STATUS
+//   Protocol Task принимает pack номер → формирует JSON ack → Android
+//   При ota_end (TOPIC_CMD) → Update.end() → ESP.restart()
+//   При ошибке → публикует отрицательный pack в TOPIC_OTA_STATUS
 //
-// ВЕРСИЯ: 6.8.6 — OTA через DataRouter (без btSend, без мьютексов)
+// Архитектура: OTA Task НЕ работает с JSON. Только бинарные данные → flash.
+//
+// ВЕРСИЯ: 6.8.7 — OTA: бинарные данные через DataRouter (без JSON/base64)
 // -----------------------------------------------------------------------------
 
 #include "ota_task.h"
@@ -17,43 +20,9 @@
 #include "topics.h"
 #include "commands.h"
 #include "app_config.h"
+#include "packets.h"
 #include <Update.h>
 #include <ArduinoJson.h>
-
-// =============================================================================
-// Base64-декодер (без внешних зависимостей)
-// =============================================================================
-
-static const char b64Table[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static int b64Decode(const char* input, uint8_t* output) {
-    int inputLen = 0;
-    while (input[inputLen]) inputLen++;
-
-    int outputLen = 0;
-    int val = 0;
-    int valb = -8;
-
-    for (int i = 0; i < inputLen; i++) {
-        char c = input[i];
-        if (c == '=' || c == '\r' || c == '\n' || c == ' ') continue;
-
-        int pos = -1;
-        for (int j = 0; j < 64; j++) {
-            if (b64Table[j] == c) { pos = j; break; }
-        }
-        if (pos == -1) continue;
-
-        val = (val << 6) + pos;
-        valb += 6;
-        if (valb >= 0) {
-            output[outputLen++] = (uint8_t)((val >> valb) & 0xFF);
-            valb -= 8;
-        }
-    }
-    return outputLen;
-}
 
 // =============================================================================
 // Глобальные переменные OTA
@@ -66,7 +35,6 @@ static size_t        otaFirmwareSize = 0;
 static size_t        otaWritten     = 0;
 static int           expectedPack   = 1;     // Ожидаемый номер пакета (начинаем с 1)
 static int           totalChunks    = 0;
-static uint8_t       decodeBuf[OTA_DECODE_BUF_SIZE];
 
 // Очереди (создаются внутри задачи, регистрируются в DataRouter)
 static QueueHandle_t cmdQ      = NULL;
@@ -81,99 +49,44 @@ bool otaIsInProgress() {
 }
 
 // =============================================================================
-// otaSend — публикация в шину (через DataRouter → BT Transport → Android)
+// publishOtaStatus — публикация pack номера в шину (для Protocol Task)
+//   pack > 0  — чанк успешно записан
+//   pack < 0  — ошибка (абсолютное значение = pack номер)
 // =============================================================================
 
-static void otaSend(const char* json) {
-    DataRouter::getInstance().publishString(TOPIC_MSG_OUTGOING, json);
+static void publishOtaStatus(int pack) {
+    DataRouter::getInstance().publish(TOPIC_OTA_STATUS, pack);
 }
 
 // =============================================================================
-// sendOtaError — отправка сообщения об ошибке на Android
+// processChunk — обработка одного чанка (бинарные данные из OtaChunkPack)
 // =============================================================================
 
-static void sendOtaError(const char* reason) {
-    Serial.printf("[OTA] ERROR: %s\n", reason);
-    JsonDocument doc;
-    doc["ota_error"] = reason;
-    char buf[128];
-    serializeJson(doc, buf, sizeof(buf));
-    otaSend(buf);
-}
-
-// =============================================================================
-// sendOtaInit — ответ Android с параметрами чанков + ack_id
-// =============================================================================
-
-static void sendOtaInit(int chunkSize, int count, int ackId) {
-    Serial.printf("[OTA] INIT: chunkSize=%d bytes, count=%d chunks, ack_id=%d\n", chunkSize, count, ackId);
-    JsonDocument doc;
-    doc["ack_id"] = ackId;
-    JsonObject init = doc["ota_init"].to<JsonObject>();
-    init["size"]  = chunkSize;
-    init["count"] = count;
-    char buf[128];
-    serializeJson(doc, buf, sizeof(buf));
-    otaSend(buf);
-}
-
-// =============================================================================
-// processChunk — обработка одного чанка данных
-// =============================================================================
-
-static bool processChunk(const char* jsonStr) {
-    JsonDocument doc;
-    if (deserializeJson(doc, jsonStr)) {
-        sendOtaError("invalid_chunk_json");
-        return false;
-    }
-
-    int pack = doc["pack"];
-    const char* b64 = doc["bin"];
-
-    if (pack <= 0 || !b64) {
-        sendOtaError("missing_pack_or_bin");
-        return false;
-    }
+static void processChunk(const OtaChunkPack* pack) {
+    if (!pack) return;
 
     // Проверка последовательности
-    if (pack != expectedPack) {
-        Serial.printf("[OTA] Wrong pack: expected %d, got %d — DISCARDED\n", expectedPack, pack);
+    if (pack->pack != expectedPack) {
+        Serial.printf("[OTA] Wrong pack: expected %d, got %d — DISCARDED\n", expectedPack, pack->pack);
         // Повтор предыдущего — отправляем ack чтобы Android двинулся дальше
-        JsonDocument ack;
-        ack["ota_read"] = expectedPack - 1;
-        ack["ack_id"] = doc["ack_id"];
-        char buf[64];
-        serializeJson(ack, buf, sizeof(buf));
-        otaSend(buf);
-        return true;
+        publishOtaStatus(expectedPack - 1);
+        return;
     }
 
-    // Декодируем base64
-    int decodedLen = b64Decode(b64, decodeBuf);
-    if (decodedLen <= 0) {
-        sendOtaError("base64_decode_failed");
-        return false;
-    }
-
-    // Пишем во flash
-    size_t written = Update.write(decodeBuf, decodedLen);
-    if (written != (size_t)decodedLen) {
-        sendOtaError("flash_write_failed");
-        return false;
+    // Пишем во flash (Update.write требует non-const)
+    uint8_t* dataPtr = const_cast<uint8_t*>(pack->data);
+    size_t written = Update.write(dataPtr, pack->dataLen);
+    if (written != pack->dataLen) {
+        Serial.printf("[OTA] Flash write failed at pack %d\n", pack->pack);
+        publishOtaStatus(-pack->pack);  // отрицательный = ошибка
+        return;
     }
 
     otaWritten += written;
-
-    // Отправляем подтверждение Android (ack_id = msg_id входящего сообщения)
-    JsonDocument ack;
-    ack["ota_read"] = pack;
-    ack["ack_id"] = doc["ack_id"];
-    char buf[64];
-    serializeJson(ack, buf, sizeof(buf));
-    otaSend(buf);
-
     expectedPack++;
+
+    // Публикуем успеш — Protocol Task сформирует JSON ack
+    publishOtaStatus(pack->pack);
 
     // Лог прогресса каждые 10%
     int progress = (int)((otaWritten * 100) / otaFirmwareSize);
@@ -183,8 +96,6 @@ static bool processChunk(const char* jsonStr) {
         Serial.printf("[OTA] Progress: %d%% (%u/%u bytes)\n",
                       progress, (unsigned)otaWritten, (unsigned)otaFirmwareSize);
     }
-
-    return true;
 }
 
 // =============================================================================
@@ -201,8 +112,8 @@ void otaTask(void* parameter) {
     cmdQ = xQueueCreate(3, sizeof(uint8_t));
     dr.subscribe(TOPIC_CMD, cmdQ, QueuePolicy::FIFO_DROP);
 
-    // Подписка на чанки данных
-    chunkQ = xQueueCreate(1, OTA_DECODE_BUF_SIZE + 128);
+    // Подписка на чанки данных (бинарные OtaChunkPack)
+    chunkQ = xQueueCreate(1, sizeof(OtaChunkPack));
     dr.subscribe(TOPIC_OTA_CHUNK, chunkQ, QueuePolicy::FIFO_DROP);
 
     Serial.printf("[OTA] Task started. Size=%u bytes, chunks=%d\n",
@@ -219,7 +130,8 @@ void otaTask(void* parameter) {
                     // Финализация
                     Serial.println("[OTA] CMD_OTA_END received, finalizing...");
                     if (!Update.end(true)) {
-                        sendOtaError("update_end_failed");
+                        Serial.println("[OTA] Update.end() FAILED!");
+                        publishOtaStatus(-1);
                     } else {
                         Serial.printf("[OTA] Complete! %u bytes written.\n",
                                       (unsigned)otaWritten);
@@ -231,11 +143,11 @@ void otaTask(void* parameter) {
             }
         }
 
-        // --- Чанки данных ---
+        // --- Чанки данных (бинарные OtaChunkPack) ---
         if (chunkQ) {
-            char chunkBuf[OTA_DECODE_BUF_SIZE + 128];
-            while (xQueueReceive(chunkQ, chunkBuf, 0) == pdTRUE) {
-                processChunk(chunkBuf);
+            OtaChunkPack chunk;
+            while (xQueueReceive(chunkQ, &chunk, 0) == pdTRUE) {
+                processChunk(&chunk);
             }
         }
 
@@ -248,10 +160,9 @@ void otaTask(void* parameter) {
 // =============================================================================
 
 void otaTaskStart(size_t firmwareSize, int ackId) {
-    // Если OTA уже запущена — повторно отправляем ack_id,
-    // чтобы Android получил подтверждение (повторный запрос)
+    // Если OTA уже запущена — повторяем pack=-1 (ota_init сигнал для Protocol)
     if (otaTaskHandle) {
-        sendOtaInit(OTA_CHUNK_BIN_SIZE, totalChunks, ackId);
+        publishOtaStatus(-1);  // маркер ota_init
         return;
     }
 
@@ -275,8 +186,8 @@ void otaTaskStart(size_t firmwareSize, int ackId) {
 
     Serial.printf("[OTA] Update initialized. Ready for %d chunks.\n", totalChunks);
 
-    // Ответ Android — один пакет: ota_init + ack_id
-    sendOtaInit(OTA_CHUNK_BIN_SIZE, totalChunks, ackId);
+    // Публикуем ota_init сигнал — Protocol Task сформирует JSON и отправит Android
+    publishOtaStatus(-1);
 
     // Ядро 1 (то же, что и Protocol)
     xTaskCreatePinnedToCore(otaTask, "OTA", 4096, NULL, 3, &otaTaskHandle, 1);
@@ -292,8 +203,6 @@ void otaTaskStop() {
         otaTaskHandle = NULL;
     }
     otaRunning = false;
-    // Update.aborton() не вызываем — если задача остановлена,
-    // следующая попытка начнёт заново с Update.begin()
 }
 
 // =============================================================================

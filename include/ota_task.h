@@ -4,24 +4,24 @@
 // при получении команды ota_update от Android.
 //
 // Архитектура:
-//   - OTA Task подписывается на TOPIC_CMD (ota_update, ota_end)
-//     и на TOPIC_OTA_CHUNK (данные прошивки base64)
-//   - Protocol Task проверяет последовательность пакетов и пересылает
-//     данные в TOPIC_OTA_CHUNK только если pack == expectedPack
-//   - При ошибке OTA Task шлёт ota_error в Protocol (через btSend)
+//   - OTA Task подписывается на TOPIC_OTA_CHUNK (OtaChunkPack — бинарные данные)
+//     и на TOPIC_CMD (ota_end)
+//   - Protocol Task декодирует base64 из JSON, публикует OtaChunkPack
+//   - OTA Task пишет flash → публикует pack номер в TOPIC_OTA_STATUS
+//   - Protocol Task принимает pack номер → формирует JSON ack → Android
 //
 // Протокол OTA:
 //   1. Android → {"command":"ota_update","size":<firmware_size>}
 //   2. Protocol → сохраняет версию, останавливает задачи, запускает OTA Task
 //   3. Protocol → Android: {"ota_init":{"size":<chunk_size>,"count":<chunks>}}
 //   4. Android → {"command":"ota_data","data":{"pack":N,"bin":"<base64>"}}
-//   5. Protocol → TOPIC_OTA_CHUNK (если pack == expectedPack)
-//   6. OTA Task → декодирует base64, пишет во flash
-//   7. Android → {"command":"ota_end"}
-//   8. OTA Task → Update.end() → ESP.restart()
-//   9. При загрузке: Protocol сравнивает версию с сохранённой → уведомляет Android
+//   5. Protocol → base64_decode → OtaChunkPack → TOPIC_OTA_CHUNK
+//   6. OTA Task → Update.write() → pack номер → TOPIC_OTA_STATUS
+//   7. Protocol → JSON ack → Android
+//   8. Android → {"command":"ota_end"}
+//   9. OTA Task → Update.end() → ESP.restart()
 //
-// ВЕРСИЯ: 6.6.0 — OTA Task (специфическая задача, msg_id/ack_id гарантия)
+// ВЕРСИЯ: 6.8.7 — OTA Task: бинарные данные (без JSON/base64)
 // -----------------------------------------------------------------------------
 
 #ifndef OTA_TASK_H
@@ -36,8 +36,6 @@
 // =============================================================================
 
 #define OTA_CHUNK_BIN_SIZE   1024   // Бинарные данные за чанк (байт)
-#define OTA_CHUNK_B64_SIZE   1368   // Base64-представление 1024 байт (~1368 символа)
-#define OTA_DECODE_BUF_SIZE  1536   // Буфер декодирования (с запасом)
 #define OTA_MAX_CHUNKS       8192   // Максимум чанков (~2 МБ, достаточно для ESP32)
 
 // =============================================================================

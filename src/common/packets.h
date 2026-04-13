@@ -261,4 +261,31 @@ typedef struct {
 } SettingsPack;
 #pragma pack(pop)
 
+// =============================================================================
+// OtaChunkPack — OTA-чанк (бинарные данные прошивки)
+// =============================================================================
+//
+// Назначение:
+//   Передача декодированных бинарных данных прошивки от Protocol Task к OTA Task.
+//   Protocol Task декодирует base64 из JSON, публикует OtaChunkPack.
+//   OTA Task принимает бинарные данные, пишет во flash, публикует pack номер.
+//
+// Кто публикует:
+//   - Protocol Task (после base64-декодирования входящего ota_data)
+//
+// Кто подписан:
+//   - OTA Task (запись во flash через Update.write)
+//
+// Retain: false (чанки должны идти по порядку, кэш не нужен)
+// Размер: 1033 байт (4 pack + 4 ackId + 1024 data + 1 dataLen)
+//
+#pragma pack(push, 1)
+typedef struct {
+    int      pack;              // Номер пакета (начиная с 1)
+    int      ackId;             // ack_id входящего сообщения (для квитанции)
+    uint8_t  dataLen;           // Длина данных в этом чанке (0..255, обычно 1024)
+    uint8_t  data[1024];        // Бинарные данные прошивки
+} OtaChunkPack;
+#pragma pack(pop)
+
 #endif // PACKETS_H
