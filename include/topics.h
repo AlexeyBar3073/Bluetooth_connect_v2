@@ -134,13 +134,13 @@ enum Topic : uint8_t {
     // Политика: QUEUE_OVERWRITE, depth=1.
 
     TOPIC_OTA_CHUNK        = 0xF7,
-    // Данные OTA-обновления (OtaChunkPack* — бинарные данные прошивки).
-    // Кто публикует: Protocol Task (приём ota_data от Android, base64-декодирование, проверка seq).
-    // Кто подписан: OTA Task (запись во flash через Update.write).
+    // Данные OTA-обновления (string — base64-строка {"pack":N,"bin":"<base64>"}).
+    // Кто публикует: Protocol Task (приём ota_data от Android, проверка seq).
+    // Кто подписан: OTA Task (декодирование base64 → запись во flash).
     // Политика: QUEUE_FIFO_DROP, depth=1 (последовательная обработка).
 
-    TOPIC_OTA_STATUS       = 0xF8,
-    // Статус записи OTA-чанка (int — pack номер, отрицательный = ошибка).
+    TOPIC_OTA_RESULT       = 0xF8,
+    // Результат записи OTA-чанка (int — pack номер, отрицательный = ошибка).
     // Кто публикует: OTA Task (после Update.write).
     // Кто подписан: Protocol Task (формирование JSON ack для Android).
     // Политика: QUEUE_FIFO_DROP, depth=3 (буфер для нескольких результатов).

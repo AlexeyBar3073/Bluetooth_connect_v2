@@ -81,41 +81,6 @@ static char outBuffer[512];
 static char rxIncomingBuffer[2048];
 
 // =============================================================================
-// Base64-декодер (протокол — единственный кто работает с JSON/base64)
-// =============================================================================
-
-static const char b64Table[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static int b64Decode(const char* input, uint8_t* output) {
-    int inputLen = 0;
-    while (input[inputLen]) inputLen++;
-
-    int outputLen = 0;
-    int val = 0;
-    int valb = -8;
-
-    for (int i = 0; i < inputLen; i++) {
-        char c = input[i];
-        if (c == '=' || c == '\r' || c == '\n' || c == ' ') continue;
-
-        int pos = -1;
-        for (int j = 0; j < 64; j++) {
-            if (b64Table[j] == c) { pos = j; break; }
-        }
-        if (pos == -1) continue;
-
-        val = (val << 6) + pos;
-        valb += 6;
-        if (valb >= 0) {
-            output[outputLen++] = (uint8_t)((val >> valb) & 0xFF);
-            valb -= 8;
-        }
-    }
-    return outputLen;
-}
-
-// =============================================================================
 // processEnginePack
 // =============================================================================
 
@@ -330,29 +295,14 @@ static void processIncoming(QueueHandle_t q) {
             continue;
         }
 
-        // --- ota_data — порция данных прошивки → base64_decode → OtaChunkPack ---
+        // --- ota_data — порция данных прошивки → в шину → ack_id ---
         if (strcmp(cmd, "ota_data") == 0) {
-            int pack = doc["data"]["pack"];
             const char* b64 = doc["data"]["bin"];
-            if (b64 && pack > 0) {
-                // Декодируем base64 → бинарные данные
-                uint8_t binData[OTA_CHUNK_BIN_SIZE];
-                int decodedLen = b64Decode(b64, binData);
-                if (decodedLen <= 0) {
-                    Serial.printf("[Proto] base64 decode failed for pack %d\n", pack);
-                    continue;
-                }
-
-                // Формируем бинарный пакет для OTA Task
-                OtaChunkPack otaPack;
-                otaPack.pack = pack;
-                otaPack.ackId = lastMsgId;
-                otaPack.dataLen = (uint8_t)decodedLen;
-                memcpy(otaPack.data, binData, decodedLen);
-
-                // Публикуем в шину — OTA Task примет бинарные данные
-                DataRouter::getInstance().publishPacket(TOPIC_OTA_CHUNK, &otaPack, sizeof(OtaChunkPack));
+            if (b64) {
+                // Передаём base64 строку в OTA Task (он сам декодирует)
+                DataRouter::getInstance().publishString(TOPIC_OTA_CHUNK, rxIncomingBuffer);
             }
+            // ack_id — Protocol отвечает сразу (быстрый ответ)
             continue;
         }
 
@@ -520,9 +470,9 @@ void protocolTask(void* parameter) {
     QueueHandle_t incomingQ = xQueueCreate(1, 2048);
     dr.subscribe(TOPIC_MSG_INCOMING, incomingQ, QueuePolicy::OVERWRITE);
 
-    // Подписка на статус OTA (pack номер от OTA Task)
-    QueueHandle_t otaStatusQ = xQueueCreate(3, sizeof(int));
-    dr.subscribe(TOPIC_OTA_STATUS, otaStatusQ, QueuePolicy::FIFO_DROP);
+    // Подписка на результат OTA (pack номер от OTA Task)
+    QueueHandle_t otaResultQ = xQueueCreate(3, sizeof(int));
+    dr.subscribe(TOPIC_OTA_RESULT, otaResultQ, QueuePolicy::FIFO_DROP);
 
 #if DEBUG_LOG
     Serial.println("[Protocol] Task started (DataRouter, Fractional: FAST 100ms, TRIP 500ms, SERVICE 1000ms)");
@@ -542,22 +492,20 @@ void protocolTask(void* parameter) {
 
         if (incomingQ) processIncoming(incomingQ);
 
-        // --- Статус OTA (pack номер от OTA Task) ---
-        if (otaStatusQ) {
+        // --- Результат OTA (pack номер от OTA Task) ---
+        if (otaResultQ) {
             int otaPack;
-            while (xQueueReceive(otaStatusQ, &otaPack, 0) == pdTRUE) {
+            while (xQueueReceive(otaResultQ, &otaPack, 0) == pdTRUE) {
                 if (otaPack == -1) {
                     // ota_init — OTA Task готова к приёму
                     JsonDocument doc;
                     doc["ota_init"].to<JsonObject>()["size"]  = ota.chunkSize;
                     doc["ota_init"].to<JsonObject>()["count"] = ota.totalChunks;
-                    // ack_id берём из последнего ota_update (сохранён в OTA Task)
-                    // Для упрощения — ack_id = 0 (Android не требует ack для ota_init)
                     publishOutgoing(doc);
                     Serial.printf("[Proto] ota_init sent: chunkSize=%d, count=%d\n",
                                   ota.chunkSize, ota.totalChunks);
                 } else if (otaPack > 0) {
-                    // Успешная запись чанка — отправляем ack с ackId
+                    // Успешная запись чанка — отправляем ack
                     JsonDocument doc;
                     doc["ota_read"] = otaPack;
                     doc["ack_id"] = lastMsgId;
