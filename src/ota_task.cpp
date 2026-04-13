@@ -4,15 +4,15 @@
 //
 // Жизненный цикл:
 //   otaTaskStart(firmwareSize)  → создаёт задачу, инициализирует Update
-//   OTA Task подписывается на TOPIC_OTA_CHUNK (string — {"pack":N,"bin":"<base64>"})
+//   OTA Task подписывается на TOPIC_OTA_CHUNK (string — base64 данные прошивки)
 //   Декодирует base64 → пишет во flash → публикует pack номер в TOPIC_OTA_RESULT
 //   Protocol Task принимает результат → формирует JSON ack → Android
 //   При ota_end (TOPIC_CMD) → Update.end() → ESP.restart()
-//   При ошибке → публикует отрицательный pack в TOPIC_OTA_RESULT
 //
-// OTA Task САМ декодирует base64. Protocol только маршрутизирует.
+// OTA Task получает ТОЛЬКО base64 строку (без JSON обёртки).
+// Protocol Task извлёк bin из JSON, передал OTA, ответил ack.
 //
-// ВЕРСИЯ: 6.8.8 — OTA: base64_decode в OTA Task (не в Protocol)
+// ВЕРСИЯ: 6.8.8 — OTA Task: base64_decode внутри OTA, Protocol только маршрутизирует
 // -----------------------------------------------------------------------------
 
 #include "ota_task.h"
@@ -21,7 +21,6 @@
 #include "commands.h"
 #include "app_config.h"
 #include <Update.h>
-#include <ArduinoJson.h>
 
 // =============================================================================
 // Base64-декодер (OTA Task сам декодирует)
@@ -94,47 +93,32 @@ static void publishOtaResult(int pack) {
 }
 
 // =============================================================================
-// processChunk — обработка одного чанка (base64 строка JSON)
+// processChunk — обработка одного чанка (только base64 строка, без JSON)
 // =============================================================================
 
-static void processChunk(const char* jsonStr) {
-    JsonDocument doc;
-    if (deserializeJson(doc, jsonStr)) {
-        Serial.printf("[OTA] Invalid chunk JSON\n");
-        publishOtaResult(-1);
-        return;
-    }
-
-    int pack = doc["pack"];
-    const char* b64 = doc["bin"];
-
-    if (pack <= 0 || !b64) {
-        Serial.printf("[OTA] Missing pack or bin\n");
+static void processChunk(const char* b64Str) {
+    if (!b64Str || !*b64Str) {
+        Serial.printf("[OTA] Empty base64 data\n");
         publishOtaResult(-1);
         return;
     }
 
     // Проверка последовательности
-    if (pack != expectedPack) {
-        Serial.printf("[OTA] Wrong pack: expected %d, got %d — DISCARDED\n", expectedPack, pack);
-        // Повтор предыдущего — Android уже получил ack, пусть двигается дальше
-        publishOtaResult(expectedPack - 1);
-        return;
-    }
+    int currentPack = expectedPack;
 
     // Декодируем base64
-    int decodedLen = b64Decode(b64, decodeBuf);
+    int decodedLen = b64Decode(b64Str, decodeBuf);
     if (decodedLen <= 0) {
-        Serial.printf("[OTA] Base64 decode failed for pack %d\n", pack);
-        publishOtaResult(-pack);
+        Serial.printf("[OTA] Base64 decode failed for pack %d\n", currentPack);
+        publishOtaResult(-currentPack);
         return;
     }
 
     // Пишем во flash
     size_t written = Update.write(decodeBuf, decodedLen);
     if (written != (size_t)decodedLen) {
-        Serial.printf("[OTA] Flash write failed at pack %d\n", pack);
-        publishOtaResult(-pack);
+        Serial.printf("[OTA] Flash write failed at pack %d\n", currentPack);
+        publishOtaResult(-currentPack);
         return;
     }
 
@@ -142,7 +126,7 @@ static void processChunk(const char* jsonStr) {
     expectedPack++;
 
     // Публикуем успеш — Protocol Task сформирует JSON ack
-    publishOtaResult(pack);
+    publishOtaResult(currentPack);
 
     // Лог прогресса каждые 10%
     int progress = (int)((otaWritten * 100) / otaFirmwareSize);
@@ -168,8 +152,8 @@ void otaTask(void* parameter) {
     cmdQ = xQueueCreate(3, sizeof(uint8_t));
     dr.subscribe(TOPIC_CMD, cmdQ, QueuePolicy::FIFO_DROP);
 
-    // Подписка на чанки данных (string — {"pack":N,"bin":"<base64>"})
-    chunkQ = xQueueCreate(1, OTA_DECODE_BUF_SIZE + 128);
+    // Подписка на чанки данных (string — base64 данные прошивки)
+    chunkQ = xQueueCreate(1, OTA_CHUNK_B64_SIZE + 64);
     dr.subscribe(TOPIC_OTA_CHUNK, chunkQ, QueuePolicy::FIFO_DROP);
 
     Serial.printf("[OTA] Task started. Size=%u bytes, chunks=%d\n",
@@ -199,9 +183,9 @@ void otaTask(void* parameter) {
             }
         }
 
-        // --- Чанки данных (string JSON) ---
+        // --- Чанки данных (только base64 строка) ---
         if (chunkQ) {
-            char chunkBuf[OTA_DECODE_BUF_SIZE + 128];
+            char chunkBuf[OTA_CHUNK_B64_SIZE + 64];
             while (xQueueReceive(chunkQ, chunkBuf, 0) == pdTRUE) {
                 processChunk(chunkBuf);
             }

@@ -134,9 +134,9 @@ enum Topic : uint8_t {
     // Политика: QUEUE_OVERWRITE, depth=1.
 
     TOPIC_OTA_CHUNK        = 0xF7,
-    // Данные OTA-обновления (string — base64-строка {"pack":N,"bin":"<base64>"}).
-    // Кто публикует: Protocol Task (приём ota_data от Android, проверка seq).
-    // Кто подписан: OTA Task (декодирование base64 → запись во flash).
+    // Данные OTA-обновления (string — только base64 строка, без JSON).
+    // Кто публикует: Protocol Task (извлёк bin из ota_data JSON).
+    // Кто подписан: OTA Task (base64_decode → запись во flash).
     // Политика: QUEUE_FIFO_DROP, depth=1 (последовательная обработка).
 
     TOPIC_OTA_RESULT       = 0xF8,

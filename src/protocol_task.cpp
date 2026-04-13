@@ -295,14 +295,13 @@ static void processIncoming(QueueHandle_t q) {
             continue;
         }
 
-        // --- ota_data — порция данных прошивки → в шину → ack_id ---
+        // --- ota_data — порция данных прошивки → только bin в шину → ack_id ---
         if (strcmp(cmd, "ota_data") == 0) {
             const char* b64 = doc["data"]["bin"];
             if (b64) {
-                // Передаём base64 строку в OTA Task (он сам декодирует)
-                DataRouter::getInstance().publishString(TOPIC_OTA_CHUNK, rxIncomingBuffer);
+                // Передаём ТОЛЬКО base64 строку в OTA Task (он сам декодирует)
+                DataRouter::getInstance().publishString(TOPIC_OTA_CHUNK, b64);
             }
-            // ack_id — Protocol отвечает сразу (быстрый ответ)
             continue;
         }
 
