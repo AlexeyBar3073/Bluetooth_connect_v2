@@ -205,9 +205,7 @@ static void processCommands(QueueHandle_t q) {
                 break;
 
             case CMD_OTA_START:
-#if DEBUG_LOG
-                Serial.println("[Calculator] OTA START — shutting down");
-#endif
+                Serial.println("[Calculator] CMD_OTA_START — shutting down");
                 isRunningFlag = false;
                 vTaskDelete(NULL);
                 break;

@@ -351,9 +351,7 @@ static void processCommands() {
         }
         // --- OTA START: Завершение задачи (освобождение памяти) ---
         else if ((Command)cmd == CMD_OTA_START) {
-#if DEBUG_LOG
-            Serial.println("[RealEngine] OTA START — shutting down");
-#endif
+            Serial.println("[RealEngine] CMD_OTA_START — shutting down");
             isRunningFlag = false;
             vTaskDelete(NULL);
         }

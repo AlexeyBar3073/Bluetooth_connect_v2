@@ -97,11 +97,19 @@ static QueueHandle_t cmdQ       = NULL;
 static QueueHandle_t chunkPackQ = NULL;  // Бинарные пакеты OtaChunkPack
 
 // =============================================================================
+// otaStarting — флаг, что OTA ИНИЦИАЛИЗИРУЕТСЯ (ставится ДО создания задачи)
+// Нужен чтобы loop() НЕ перезапускал задачи, которые завершаются по CMD_OTA_START
+// =============================================================================
+
+static bool otaStarting = false;
+
+// =============================================================================
 // otaIsInProgress — проверяется loop() для блокировки рестартов
+// Возвращает true если OTA уже запущена ИЛИ только инициализируется
 // =============================================================================
 
 bool otaIsInProgress() {
-    return otaRunning;
+    return otaRunning || otaStarting;
 }
 
 // =============================================================================
@@ -289,12 +297,15 @@ void otaTask(void* parameter) {
 // =============================================================================
 
 void otaTaskStart(size_t firmwareSize, int ackId) {
-    // Если OTA уже запущена — повторяем сигнал ota_init
-    if (otaTaskHandle) {
+    // Если OTA уже запущена или инициализируется — повторяем сигнал ota_init
+    if (otaTaskHandle || otaStarting) {
         // -1 = маркер ota_init для Protocol
         publishOtaResult(-1);
         return;
     }
+
+    // СРАЗУ — чтобы loop() НЕ перезапускал задачи, которые сейчас завершатся
+    otaStarting = true;
 
     otaFirmwareSize = firmwareSize;
     otaWritten = 0;
@@ -350,6 +361,7 @@ void otaTaskStart(size_t firmwareSize, int ackId) {
         logHeapState("update_begin_failed");
         Serial.printf("[OTA] Required: %u bytes, Max alloc: %u bytes\n",
                       (unsigned)firmwareSize, (unsigned)ESP.getMaxAllocHeap());
+        otaStarting = false;  // Разблокируем loop()
         return;
     }
 

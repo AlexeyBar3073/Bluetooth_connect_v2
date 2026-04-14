@@ -75,9 +75,7 @@ void climateTask(void* parameter) {
             uint8_t cmd;
             while (xQueueReceive(cmdQ, &cmd, 0) == pdTRUE) {
                 if (cmd == CMD_OTA_START) {
-#if DEBUG_LOG
-                    Serial.println("[Climate] OTA START — shutting down");
-#endif
+                    Serial.println("[Climate] CMD_OTA_START — shutting down");
                     isRunningFlag = false;
                     vTaskDelete(NULL);
                 }

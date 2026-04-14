@@ -143,6 +143,7 @@ void oledTask(void* parameter) {
             uint8_t cmd;
             while (xQueueReceive(cmdQ, &cmd, 0) == pdTRUE) {
                 if (cmd == CMD_OTA_START) {
+                    Serial.println("[OLED] CMD_OTA_START — shutting down");
                     isRunning = false;
                     vTaskDelete(NULL);
                 }

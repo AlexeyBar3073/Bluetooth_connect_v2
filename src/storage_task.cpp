@@ -168,9 +168,7 @@ void storageTask(void* parameter) {
             uint8_t cmd;
             while (xQueueReceive(cmdQ, &cmd, 0) == pdTRUE) {
                 if (cmd == CMD_OTA_START) {
-#if DEBUG_LOG
-                    Serial.println("[Storage] OTA START — shutting down");
-#endif
+                    Serial.println("[Storage] CMD_OTA_START — shutting down");
                     isRunningFlag = false;
                     vTaskDelete(NULL);
                 }

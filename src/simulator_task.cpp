@@ -140,9 +140,7 @@ static void processCommands(QueueHandle_t cmdQueue) {
             Serial.printf("[Simulator] Full tank: fuelBase = %.1f L\n", fuelBase);
 #endif
         } else if (cmd == CMD_OTA_START) {
-#if DEBUG_LOG
-            Serial.println("[Simulator] OTA START — shutting down");
-#endif
+            Serial.println("[Simulator] CMD_OTA_START — shutting down");
             isRunning = false;
             vTaskDelete(NULL);
         }
