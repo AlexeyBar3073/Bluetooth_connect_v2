@@ -106,6 +106,9 @@ public:
     void begin();
     void reset();  // Полная очистка всех подписчиков (для OTA)
 
+    // Очистка всех очередей подписчиков на указанном топике (drain)
+    void drainTopic(Topic topic);
+
     // --- Подписка: модуль передаёт СВОЮ очередь. retain=true → получит кэш ---
     bool subscribe(Topic topic, QueueHandle_t queue, QueuePolicy policy, bool retain = false);
 

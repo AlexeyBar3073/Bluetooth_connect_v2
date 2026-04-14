@@ -60,6 +60,44 @@ void DataRouter::reset() {
 }
 
 // =============================================================================
+// drainTopic — Очистка всех очередей подписчиков на топике (выгребает всё)
+// =============================================================================
+
+void DataRouter::drainTopic(Topic topic) {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+
+    TopicRouter& tr = _topicRouters[topic];
+    if (!tr.valid) {
+        xSemaphoreGive(_mutex);
+        return;
+    }
+
+    int drained = 0;
+    for (int i = 0; i < tr.subCount; i++) {
+        QueueHandle_t q = tr.subs[i].queue;
+        if (!q) continue;
+
+        // Выгребаем всё что есть в очереди
+        UBaseType_t msgs = uxQueueMessagesWaiting(q);
+        while (msgs-- > 0) {
+            // Читаем в dummy-буфер нужного размера
+            uint8_t dummy[ROUTER_MAX_QUEUE_DEPTH * 80];
+            if (xQueueReceive(q, dummy, 0) == pdTRUE) {
+                drained++;
+            }
+        }
+    }
+
+    xSemaphoreGive(_mutex);
+
+#if DEBUG_LOG
+    if (drained > 0) {
+        Serial.printf("[DataRouter] Drained topic %d: %d messages removed\n", topic, drained);
+    }
+#endif
+}
+
+// =============================================================================
 // _resetInternal — внутренняя очистка (вызывается под мьютексом)
 // =============================================================================
 

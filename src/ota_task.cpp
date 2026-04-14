@@ -12,7 +12,9 @@
 // OTA Task получает ТОЛЬКО base64 строку (без JSON обёртки).
 // Protocol Task извлёк bin из JSON, передал OTA, ответил ack.
 //
-// ВЕРСИЯ: 6.8.8 — OTA Task: base64_decode внутри OTA, Protocol только маршрутизирует
+// ПАМЯТЬ: Перед Update.begin() останавливаются лишние задачи и освобождается куча.
+//
+// ВЕРСИЯ: 6.8.12 — OTA: освобождение кучи перед Update.begin()
 // -----------------------------------------------------------------------------
 
 #include "ota_task.h"
@@ -21,6 +23,16 @@
 #include "commands.h"
 #include "app_config.h"
 #include <Update.h>
+
+// =============================================================================
+// extern — остановка задач на время OTA
+// =============================================================================
+
+extern void simulatorStop();
+extern void calculatorStop();
+extern void klineStop();
+extern void climateStop();
+extern void oledStop();
 
 // =============================================================================
 // Base64-декодер (OTA Task сам декодирует)
@@ -90,6 +102,18 @@ bool otaIsInProgress() {
 
 static void publishOtaResult(int pack) {
     DataRouter::getInstance().publish(TOPIC_OTA_RESULT, pack);
+}
+
+// =============================================================================
+// logHeapState — диагностика состояния кучи
+// =============================================================================
+
+static void logHeapState(const char* label) {
+    Serial.printf("[OTA] HEAP [%s]: free=%u, min_free=%u, max_alloc=%u\n",
+                  label,
+                  (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getMinFreeHeap(),
+                  (unsigned)ESP.getMaxAllocHeap());
 }
 
 // =============================================================================
@@ -218,14 +242,62 @@ void otaTaskStart(size_t firmwareSize, int ackId) {
         return;
     }
 
+    // =========================================================================
+    // Освобождение памяти перед Update.begin()
+    // Update.begin(firmwareSize) требует contiguous блок ~1.18 МБ.
+    // Останавливаем задачи, которые НЕ нужны во время OTA:
+    //   - Simulator/RealEngine (физика автомобиля)
+    //   - Calculator (расчёт TripPack)
+    //   - K-Line (диагностика)
+    //   - Climate (климат)
+    //   - OLED (дисплей)
+    // =========================================================================
+
+    Serial.println("[OTA] Freeing memory before Update.begin()...");
+    logHeapState("before_stop");
+
+#if REAL_ENGINE_ENABLED
+    extern void realEngineStop();
+    realEngineStop();
+#else
+    simulatorStop();
+#endif
+    calculatorStop();
+    klineStop();
+    climateStop();
+#if OLED_ENABLED
+    oledStop();
+#endif
+
+    // Небольшая задержка чтобы задачи освободили ресурсы
+    delay(100);
+    logHeapState("after_stop");
+
+    // Очистка очередей телеметрии от накопленных данных
+    // Protocol Task может иметь накопленные пакеты в очередях подписок
+    DataRouter& dr = DataRouter::getInstance();
+    dr.drainTopic(TOPIC_ENGINE_PACK);
+    dr.drainTopic(TOPIC_TRIP_PACK);
+    dr.drainTopic(TOPIC_KLINE_PACK);
+    dr.drainTopic(TOPIC_CLIMATE_PACK);
+    dr.drainTopic(TOPIC_SETTINGS_PACK);
+    dr.drainTopic(TOPIC_MSG_INCOMING);
+    dr.drainTopic(TOPIC_MSG_OUTGOING);
+
+    logHeapState("after_drain");
+
     // Инициализируем Update
     if (!Update.begin(firmwareSize)) {
         Serial.println("[OTA] Update.begin() FAILED!");
         Update.printError(Serial);
+        logHeapState("update_begin_failed");
+        Serial.printf("[OTA] Required: %u bytes, Max alloc: %u bytes\n",
+                      (unsigned)firmwareSize, (unsigned)ESP.getMaxAllocHeap());
         return;
     }
 
     Serial.printf("[OTA] Update initialized. Ready for %d chunks.\n", totalChunks);
+    logHeapState("update_begin_ok");
 
     // Сигнал Protocol Task что OTA готова (он сформирует ota_init JSON)
     publishOtaResult(-1);
