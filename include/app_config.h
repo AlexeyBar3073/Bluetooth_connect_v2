@@ -39,13 +39,13 @@
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
 // MINOR (8) — OTA Task + BT transport оптимизация
-// BUILD (15) — CMD_OTA_START: задачи завершаются сами через DataRouter
+// BUILD (21) — OTA Task запускается по запросу (не в setup), экономия RAM
 //
 #define FW_VERSION_MAJOR 6
 #define FW_VERSION_MINOR 8
-#define FW_VERSION_BUILD 15
-#define FW_VERSION_STR   "6.8.15"
-#define FW_VERSION_NOTE  "OTA: CMD_OTA_START — self-shutdown via DataRouter"
+#define FW_VERSION_BUILD 21
+#define FW_VERSION_STR   "6.8.21"
+#define FW_VERSION_NOTE  "OTA: lazy task start, dispatch safety net"
 
 // =============================================================================
 // Аппаратные пины
@@ -97,9 +97,13 @@
 // =============================================================================
 // Размеры стека задач FreeRTOS
 // =============================================================================
+// OTA с decodeBuf в static тратит ~600-900 байт стека.
+// Protocol с ArduinoJson укладывается в 4096.
+// Остальные задачи — лёгкие, 3072 достаточно.
+// =============================================================================
 
-#define TASK_STACK_SIZE       4096   // Стандартный размер стека (байт)
-#define TASK_STACK_PROTOCOL   6144   // Protocol (ArduinoJson требует больше)
-#define TASK_STACK_CLIMATE    2048   // Climate (минимальный стек)
+#define TASK_STACK_SIZE       3072   // Стандарт (Sim, Calc, Storage, OLED, RealEngine)
+#define TASK_STACK_PROTOCOL   6144   // Protocol (ArduinoJson + OTA обработка)
+#define TASK_STACK_CLIMATE    2048   // Минимальный
 
 #endif // APP_CONFIG_H

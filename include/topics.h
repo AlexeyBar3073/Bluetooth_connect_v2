@@ -149,7 +149,7 @@ enum Topic : uint8_t {
     // OtaChunkPack (1375 байт) — бинарный пакет OTA-данных.
     // Кто публикует: Protocol Task (извлёк bin из ota_data JSON → OtaChunkPack).
     // Кто подписан: OTA Task (base64_decode → CRC16 verify → запись во flash).
-    // Политика: QUEUE_FIFO_DROP, depth=3 (буфер на случай всплеска).
+    // Политика: QUEUE_FIFO_DROP, depth=1 (очередь создаётся в otaBeginUpdate).
 
     TOPIC_COUNT  // Общее количество топиков (для массивов, циклов)
 };

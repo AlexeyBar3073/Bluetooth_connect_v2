@@ -29,7 +29,7 @@ extern void realEngineStart();    extern void realEngineStop();    extern bool r
 extern void oledStart();          extern void oledStop();          extern bool oledIsRunning();
 #endif
 
-// OTA Task
+// OTA Task — ленивый запуск при ota_update (не в setup())
 extern bool otaIsInProgress();
 
 static void restartSimulator()   { simulatorStop();  delay(100); simulatorStart(); }
@@ -60,49 +60,49 @@ void setup() {
     // 1. DataRouter
     Serial.println("[SETUP] 1/9: DataRouter...");
     DataRouter::getInstance().begin();
+    delay(50);
+
+    // 2. BT Transport — ЗАПУСКАЕМ РАНЬШЕ ВСЕХ ЗАДАЧ (до фрагментации кучи)
+    Serial.println("[SETUP] 2/9: BT Transport...");
+    btTransportStart("Car Simulator");
     delay(100);
 
-    // 2. Storage (публикует данные — кэш для остальных)
-    Serial.println("[SETUP] 2/9: Storage...");
+    // 3. Storage (публикует данные — кэш для остальных)
+    Serial.println("[SETUP] 3/9: Storage...");
     storageStart();
     delay(100);
 
     // 3. Engine (Simulator или Real)
 #if REAL_ENGINE_ENABLED
-    Serial.println("[SETUP] 3/9: Real Engine...");
+    Serial.println("[SETUP] 4/9: Real Engine...");
     realEngineStart();
 #else
-    Serial.println("[SETUP] 3/9: Simulator...");
+    Serial.println("[SETUP] 4/9: Simulator...");
     simulatorStart();
 #endif
     delay(100);
 
     // 4. Calculator
-    Serial.println("[SETUP] 4/9: Calculator...");
+    Serial.println("[SETUP] 5/9: Calculator...");
     calculatorStart();
     delay(100);
 
     // 5. Protocol
-    Serial.println("[SETUP] 5/9: Protocol...");
+    Serial.println("[SETUP] 6/9: Protocol...");
     protocolStart();
     delay(100);
 
-    // 6. BT Transport
-    Serial.println("[SETUP] 6/9: BT Transport...");
-    btTransportStart("Car Simulator");
-    delay(100);
-
-    // 7. K-Line
+    // 6. K-Line
     Serial.println("[SETUP] 7/9: K-Line...");
     klineStart();
     delay(100);
 
-    // 8. Climate
+    // 7. Climate
     Serial.println("[SETUP] 8/9: Climate...");
     climateStart();
     delay(100);
 
-    // 9. OLED
+    // 8. OLED
 #if OLED_ENABLED
     Serial.println("[SETUP] 9/9: OLED...");
     oledStart();
@@ -115,11 +115,25 @@ void setup() {
 #else
     Serial.println("\n=== Setup Complete (Sim/Storage/Calc/Proto/BT/KLine/Climate) ===\n");
 #endif
+
+    // Даём BT стеку стабилизироваться перед рестартами задач
+    delay(1000);
+    Serial.printf("[SETUP] Free heap: %u bytes\n", (unsigned)ESP.getFreeHeap());
 }
 
 // =============================================================================
 // loop — Диспетчер процессов (упрощённый)
 // =============================================================================
+
+// Cooldown для рестартов — предотвращает "смертельную спираль"
+static unsigned long lastRestartKline = 0, lastRestartClimate = 0, lastRestartStorage = 0;
+#if OLED_ENABLED
+static unsigned long lastRestartDisplay = 0;
+#endif
+#define RESTART_COOLDOWN_MS 2000  // Мин. 2 сек между рестартами
+
+// ⚠️ ВРЕМЕННО: отключён restart задач для отладки crash при подключении BT
+#define DISABLE_LOOP_RESTARTS  1
 
 void loop() {
     static unsigned long lastCheck = 0;
@@ -135,6 +149,11 @@ void loop() {
             return;
         }
 
+#if DISABLE_LOOP_RESTARTS
+        // --- Все рестарты отключены для теста ---
+        (void)lastRestartKline; (void)lastRestartClimate; (void)lastRestartStorage;
+        (void)RESTART_COOLDOWN_MS;
+#else
         // Критичные модули — Engine (Sim или Real)
 #if REAL_ENGINE_ENABLED
         if (!realEngineIsRunning()) {
@@ -147,7 +166,8 @@ void loop() {
             restartSimulator();
         }
 #endif
-        if (!storageIsRunning()) {
+        if (!storageIsRunning() && (now - lastRestartStorage >= RESTART_COOLDOWN_MS)) {
+            lastRestartStorage = now;
             Serial.println("[LOOP] HIGH: Storage crashed! Restarting...");
             restartStorage();
         }
@@ -160,21 +180,25 @@ void loop() {
             restartProtocol();
         }
 
-        // Сервисные модули
-        if (!klineIsRunning()) {
+        // Сервисные модули (с cooldown)
+        if (!klineIsRunning() && (now - lastRestartKline >= RESTART_COOLDOWN_MS)) {
+            lastRestartKline = now;
             Serial.println("[LOOP] LOW: K-Line crashed! Restarting...");
             restartKline();
         }
-        if (!climateIsRunning()) {
+        if (!climateIsRunning() && (now - lastRestartClimate >= RESTART_COOLDOWN_MS)) {
+            lastRestartClimate = now;
             Serial.println("[LOOP] LOW: Climate crashed! Restarting...");
             restartClimate();
         }
 #if OLED_ENABLED
-        if (!oledIsRunning()) {
+        if (!oledIsRunning() && (now - lastRestartDisplay >= RESTART_COOLDOWN_MS)) {
+            lastRestartDisplay = now;
             Serial.println("[LOOP] LOW: OLED crashed! Restarting...");
             restartDisplay();
         }
 #endif
+#endif // DISABLE_LOOP_RESTARTS
     }
 
     vTaskDelay(50 / portTICK_PERIOD_MS);

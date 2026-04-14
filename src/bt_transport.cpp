@@ -194,10 +194,17 @@ void btTransportTask(void* parameter) {
 
         // --- 4. TX: TOPIC_MSG_OUTGOING → Android (без ожидания) ---
         if (isConnected && txQueue) {
-            char txBuffer[2048];  // Увеличено до 2048
+            char txBuffer[2048];
             if (xQueueReceive(txQueue, txBuffer, 0) == pdTRUE) {
-                SerialBT.print(txBuffer);
-                SerialBT.print('\n');
+                size_t len = strlen(txBuffer) + 1;  // +1 за '\n'
+                // Отправляем только если в SPP-буфере есть место под всё сообщение.
+                // Если места нет — пакет дропается (OVERWRITE: новый заменит старый).
+                // Это предотвращает SPP Write Congested при заторах.
+                int avail = SerialBT.availableForWrite();
+                if (avail <= 0 || (size_t)avail >= len) {
+                    SerialBT.print(txBuffer);
+                    SerialBT.print('\n');
+                }
             }
         }
 
@@ -213,15 +220,27 @@ void btTransportTask(void* parameter) {
 void btTransportStart(const char* deviceName) {
     if (btTaskHandle) return;
 
-    // Задержка перед инициализацией BT — обход бага ESP-IDF HCI HAL crash
-#if DEBUG_LOG
-    Serial.printf("[BT Transport] Delaying init to avoid HCI crash...\n");
-#endif
-    delay(500);
+    // Проверка кучи перед BT-init — Bluedroid требует ≥30 КБ
+    if (ESP.getFreeHeap() < 30000) {
+        Serial.printf("[BT] Low heap (%u < 30000). Waiting for stabilization...\n", ESP.getFreeHeap());
+        delay(2000);
+        if (ESP.getFreeHeap() < 28000) {
+            Serial.printf("[BT] Init ABORTED (heap still too low: %u)\n", ESP.getFreeHeap());
+            return;
+        }
+    }
 
+    // Увеличенная задержка — обход бага ESP-IDF HCI HAL crash
 #if DEBUG_LOG
     Serial.printf("[BT Transport] Initializing '%s'...\n", deviceName);
 #endif
+    delay(800);
+
+#if DEBUG_LOG
+    Serial.printf("[BT Transport] Free heap: %u, max_alloc: %u\n",
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+#endif
+
     if (!SerialBT.begin(deviceName)) {
         Serial.println("[BT Transport] Init FAILED!");
         return;

@@ -36,6 +36,7 @@
 
 #include "calculator.h"
 #include "data_router.h"
+#include "task_common.h"
 
 // =============================================================================
 // Глобальные переменные
@@ -171,49 +172,41 @@ static void processCorrectOdo(QueueHandle_t q) {
 }
 
 // =============================================================================
-// processCommands: Обработка команд
+// processCommands: Обработка специфичных команд (вызывается из task_common)
 // =============================================================================
-static void processCommands(QueueHandle_t q) {
-    uint8_t cmd;
-    while (xQueueReceive(q, &cmd, 0) == pdTRUE) {
-        switch ((Command)cmd) {
-            case CMD_RESET_TRIP_A:
-                trip_a_base = -current_distance;
-                fuel_trip_a_base = -current_fuel_used;
+static bool calcSpecificCmd(uint8_t cmd) {
+    switch ((Command)cmd) {
+        case CMD_RESET_TRIP_A:
+            trip_a_base = -current_distance;
+            fuel_trip_a_base = -current_fuel_used;
 #if DEBUG_LOG
-                Serial.println("[Calculator] Trip A reset");
+            Serial.println("[Calculator] Trip A reset");
 #endif
-                break;
+            break;
 
-            case CMD_RESET_TRIP_B:
-                trip_b_base = -current_distance;
-                fuel_trip_b_base = -current_fuel_used;
+        case CMD_RESET_TRIP_B:
+            trip_b_base = -current_distance;
+            fuel_trip_b_base = -current_fuel_used;
 #if DEBUG_LOG
-                Serial.println("[Calculator] Trip B reset");
+            Serial.println("[Calculator] Trip B reset");
 #endif
-                break;
+            break;
 
-            case CMD_RESET_AVG:
-                current_distance  = 0.0f;
-                current_fuel_used = 0.0f;
-                avg_cur = 0.0f;
-                break;
+        case CMD_RESET_AVG:
+            current_distance  = 0.0f;
+            current_fuel_used = 0.0f;
+            avg_cur = 0.0f;
+            break;
 
-            case CMD_FULL_TANK:
-                fuel_base = tank_capacity;
-                current_fuel_used = 0.0f;
-                break;
+        case CMD_FULL_TANK:
+            fuel_base = tank_capacity;
+            current_fuel_used = 0.0f;
+            break;
 
-            case CMD_OTA_START:
-                Serial.println("[Calculator] CMD_OTA_START — shutting down");
-                isRunningFlag = false;
-                vTaskDelete(NULL);
-                break;
-
-            default:
-                break;
-        }
+        default:
+            return false;  // Не обработана — пусть task_common логирует
     }
+    return true;
 }
 
 // =============================================================================
@@ -222,7 +215,10 @@ static void processCommands(QueueHandle_t q) {
 
 void calculatorTask(void* parameter) {
     (void)parameter;
-    isRunningFlag = true;
+
+    TaskContext ctx;
+    if (!taskInit(&ctx, "Calculator", &isRunningFlag, &lastHeartbeat)) return;
+
     DataRouter& dr = DataRouter::getInstance();
 
     // Создаём очереди и регистрируем в DataRouter
@@ -230,13 +226,11 @@ void calculatorTask(void* parameter) {
     QueueHandle_t tripQ       = xQueueCreate(1, sizeof(TripPack));
     QueueHandle_t settingsQ   = xQueueCreate(1, sizeof(SettingsPack));
     QueueHandle_t correctOdoQ = xQueueCreate(1, sizeof(int));
-    QueueHandle_t cmdQ        = xQueueCreate(5, sizeof(uint8_t));
 
     dr.subscribe(TOPIC_ENGINE_PACK,    engineQ,     QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_TRIP_PACK,      tripQ,       QueuePolicy::OVERWRITE, true);   // retain
     dr.subscribe(TOPIC_SETTINGS_PACK,  settingsQ,   QueuePolicy::OVERWRITE, true);   // retain
     dr.subscribe(TOPIC_CORRECT_ODO,    correctOdoQ, QueuePolicy::OVERWRITE);
-    dr.subscribe(TOPIC_CMD,            cmdQ,        QueuePolicy::FIFO_DROP);
 
 #if DEBUG_LOG
     Serial.println("[Calculator] Task started (DataRouter-based)");
@@ -246,14 +240,14 @@ void calculatorTask(void* parameter) {
     const unsigned long PUBLISH_INTERVAL = 1000;
 
     while (1) {
-        lastHeartbeat = millis();
+        taskHeartbeat(&ctx);
 
         // Читаем все доступные сообщения из очередей
         if (engineQ)      processEnginePack(engineQ);
         if (tripQ)        processTripPack(tripQ);
         if (settingsQ)    processSettingsPack(settingsQ);
         if (correctOdoQ)  processCorrectOdo(correctOdoQ);
-        if (cmdQ)         processCommands(cmdQ);
+        taskProcessCommands(&ctx, calcSpecificCmd);
 
         // Расчёт и публикация TripPack каждую секунду
         unsigned long now = millis();

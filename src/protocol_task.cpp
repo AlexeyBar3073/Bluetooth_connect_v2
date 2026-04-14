@@ -220,11 +220,6 @@ static void processIncoming(QueueHandle_t q) {
         if (!cmd) cmd = doc["cmd"];
         if (!cmd) continue;
 
-        // --- Лог каждой команды (unconditional для отладки OTA) ---
-        if (strstr(cmd, "ota") != NULL) {
-            Serial.printf("[Proto] RX OTA command: '%s'\n", cmd);
-        }
-
         // Извлекаем msg_id
         JsonVariant msgIdVar = doc["msg_id"];
         if (!msgIdVar.isNull() && msgIdVar.is<int>()) {
@@ -280,14 +275,25 @@ static void processIncoming(QueueHandle_t q) {
             if (fwSize > 0) {
                 // Останавливаем телеметрию
                 isStreamingActive = false;
-                Serial.println("[Proto] Telemetry stopped, calling otaTaskStart...");
 
                 // Сохраняем для ota_init ответа
                 ota.totalChunks = (fwSize + OTA_CHUNK_BIN_SIZE - 1) / OTA_CHUNK_BIN_SIZE;
                 ota.chunkSize = OTA_CHUNK_BIN_SIZE;
 
-                // OTA Task сам опубликует ota_init через DataRouter
-                otaTaskStart((size_t)fwSize, lastMsgId);
+                // Публикуем CMD_OTA_START — остальные задачи завершатся
+                DataRouter::getInstance().publish(TOPIC_CMD, CMD_OTA_START);
+
+                // OTA Task запускается лениво внутри otaBeginUpdate
+                otaBeginUpdate((size_t)fwSize);
+
+                // Формируем ota_init прямо здесь — OTA Task готова сразу
+                JsonDocument doc;
+                doc["ack_id"] = lastMsgId;
+                doc["ota_init"].to<JsonObject>()["size"]  = ota.chunkSize;
+                doc["ota_init"].to<JsonObject>()["count"] = ota.totalChunks;
+                publishOutgoing(doc);
+                Serial.printf("[Proto] ota_init sent: chunkSize=%d, count=%d, ack_id=%d\n",
+                              ota.chunkSize, ota.totalChunks, lastMsgId);
             } else {
                 Serial.println("[Proto] ota_update: INVALID SIZE");
                 JsonDocument resp;
@@ -318,11 +324,12 @@ static void processIncoming(QueueHandle_t q) {
                 otaPack.b64[otaPack.b64_len] = '\0';  // Нуль-терминатор
 
                 // Публикуем через механизм пакетов (прямой memcpy в очередь)
-                DataRouter::getInstance().publishPacket(
+                bool sent = DataRouter::getInstance().publishPacket(
                     TOPIC_OTA_CHUNK_PACK,
                     &otaPack,
                     sizeof(OtaChunkPack)
                 );
+                Serial.printf("[Proto] publishPacket pack=%d, dispatched=%d\n", pack, sent ? 1 : 0);
             }
 
             // ack_id — БЕЗУСЛОВНЫЙ ответ, не ждём OTA
@@ -522,16 +529,7 @@ void protocolTask(void* parameter) {
         if (otaResultQ) {
             int otaPack;
             while (xQueueReceive(otaResultQ, &otaPack, 0) == pdTRUE) {
-                if (otaPack == -1) {
-                    // ota_init — OTA Task готова к приёму
-                    JsonDocument doc;
-                    doc["ack_id"] = lastMsgId;
-                    doc["ota_init"].to<JsonObject>()["size"]  = ota.chunkSize;
-                    doc["ota_init"].to<JsonObject>()["count"] = ota.totalChunks;
-                    publishOutgoing(doc);
-                    Serial.printf("[Proto] ota_init sent: chunkSize=%d, count=%d, ack_id=%d\n",
-                                  ota.chunkSize, ota.totalChunks, lastMsgId);
-                } else if (otaPack > 0) {
+                if (otaPack > 0) {
                     // Успешная запись чанка — отправляем ack
                     JsonDocument doc;
                     doc["ota_read"] = otaPack;

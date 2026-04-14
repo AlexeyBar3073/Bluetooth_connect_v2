@@ -108,7 +108,9 @@ static void processCommands() {
             case CMD_OTA_START:
                 Serial.println("[KLine] CMD_OTA_START — shutting down");
                 isRunningFlag = false;
-                vTaskDelete(NULL);
+                // Безопасный выход — FreeRTOS удалит TCB.
+                // klineStop() вызовется из loop() и очистит taskHandle.
+                return;
                 break;
 
             default:
@@ -198,15 +200,14 @@ void klineStop() {
     if (taskHandle) {
         vTaskDelete(taskHandle);
         taskHandle = NULL;
-        isRunningFlag = false;
-        if (cmdQueue != NULL) {
-            vQueueDelete(cmdQueue);
-            cmdQueue = NULL;
-        }
-#if DEBUG_LOG
-        Serial.println("[KLine] Stopped");
-#endif
     }
+    isRunningFlag = false;
+    // НЕ удаляем очередь — при рестарте создастся новая, старая освободится кучей.
+    // vQueueDelete при асинхронных рестартах вызывает гонки и assert pxQueue.
+    cmdQueue = NULL;
+#if DEBUG_LOG
+    Serial.println("[KLine] Stopped (safe shutdown)");
+#endif
 }
 
 bool klineIsRunning() { return isRunningFlag && (millis() - lastHeartbeat) < 3000; }

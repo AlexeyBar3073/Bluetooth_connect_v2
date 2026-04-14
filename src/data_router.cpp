@@ -72,29 +72,15 @@ void DataRouter::drainTopic(Topic topic) {
         return;
     }
 
-    int drained = 0;
     for (int i = 0; i < tr.subCount; i++) {
         QueueHandle_t q = tr.subs[i].queue;
-        if (!q) continue;
-
-        // Выгребаем всё что есть в очереди
-        UBaseType_t msgs = uxQueueMessagesWaiting(q);
-        while (msgs-- > 0) {
-            // Читаем в dummy-буфер нужного размера
-            uint8_t dummy[ROUTER_MAX_QUEUE_DEPTH * 80];
-            if (xQueueReceive(q, dummy, 0) == pdTRUE) {
-                drained++;
-            }
+        if (q) {
+            xQueueReset(q);
+            tr.subs[i].dropCount = 0;
         }
     }
 
     xSemaphoreGive(_mutex);
-
-#if DEBUG_LOG
-    if (drained > 0) {
-        Serial.printf("[DataRouter] Drained topic %d: %d messages removed\n", topic, drained);
-    }
-#endif
 }
 
 // =============================================================================
@@ -196,6 +182,11 @@ bool DataRouter::_dispatch(Topic topic, const void* data, size_t len) {
 
     for (int i = 0; i < tr.subCount; i++) {
         SubscriberSlot& sub = tr.subs[i];
+
+        // SAFETY NET: пропуск удалённых/невалидных очередей
+        // Если задача удалила очередь, но не отписалась — sub.queue == NULL
+        if (!sub.queue) continue;
+
         BaseType_t result;
 
         if (sub.policy == QueuePolicy::OVERWRITE) {

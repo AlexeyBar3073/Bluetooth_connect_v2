@@ -1,19 +1,15 @@
 // -----------------------------------------------------------------------------
 // ota_task.cpp
-// OTA-обновление прошивки — специализированная задача.
+// OTA-обновление прошивки — полноправная задача FreeRTOS.
 //
-// Жизненный цикл:
-//   otaTaskStart(firmwareSize)  → CMD_OTA_START → ждёт остановки задач → Update
-//   OTA Task подписывается на TOPIC_OTA_CHUNK_PACK (OtaChunkPack — бинарный пакет)
-//   Декодирует base64 → CRC16 verify → пишет во flash → публикует pack в TOPIC_OTA_RESULT
-//   Protocol Task принимает результат → формирует JSON ack → Android
-//   При ota_end (TOPIC_CMD) → Update.end() → ESP.restart()
+// Архитектура:
+//   - Запускается в setup() как все задачи (simulator, calculator...)
+//   - Подписывается на TOPIC_CMD и TOPIC_OTA_CHUNK_PACK
+//   - В обычном режиме — просто висит, не мешает
+//   - По CMD_OTA_START: останавливает телеметрию, Update.begin, обрабатывает чанки
+//   - По CMD_OTA_END: Update.end() → ESP.restart()
 //
-// Управление памятью:
-//   CMD_OTA_START публикуется в TOPIC_CMD — каждая задача сама завершается
-//   (isRunningFlag = false, vTaskDelete). DataRouter — только почтальон.
-//
-// ВЕРСИЯ: 6.8.15 — OTA: CMD_OTA_START, задачи завершаются сами
+// ВЕРСИЯ: 6.8.19 — OTA Task стартует в setup(), как все задачи
 // -----------------------------------------------------------------------------
 
 #include "ota_task.h"
@@ -21,10 +17,11 @@
 #include "topics.h"
 #include "commands.h"
 #include "app_config.h"
+#include "task_common.h"
 #include <Update.h>
 
 // =============================================================================
-// CRC16 — полином 0xA001 (CRC-16-IBM), стандарт для embedded
+// CRC16 — полином 0xA001 (CRC-16-IBM)
 // =============================================================================
 
 static uint16_t crc16(const uint8_t* data, size_t len) {
@@ -43,7 +40,7 @@ static uint16_t crc16(const uint8_t* data, size_t len) {
 }
 
 // =============================================================================
-// Base64-декодер (OTA Task сам декодирует)
+// Base64-декодер
 // =============================================================================
 
 static const char b64Table[] =
@@ -81,41 +78,22 @@ static int b64Decode(const char* input, uint8_t* output) {
 // Глобальные переменные OTA
 // =============================================================================
 
-static TaskHandle_t  otaTaskHandle  = NULL;
-static bool          otaRunning     = false;
-static unsigned long lastHeartbeat  = 0;
+static TaskHandle_t  otaTaskHandle   = NULL;
+static bool          isRunningFlag   = false;
+static unsigned long lastHeartbeat   = 0;
+static bool          otaActive       = false;  // true = OTA в процессе записи
 static size_t        otaFirmwareSize = 0;
 static size_t        otaWritten     = 0;
-static int           expectedPack   = 1;     // Ожидаемый номер пакета (начинаем с 1)
-static int           totalChunks    = 0;
-static uint8_t       decodeBuf[OTA_DECODE_BUF_SIZE];
+static uint16_t      expectedPack   = 1;
 static unsigned long lastChunkTime  = 0;
-#define OTA_TIMEOUT_MS 5000  // 5 секунд без данных — таймаут
+#define OTA_TIMEOUT_MS 30000  // 30 сек без данных — Android отвалился
 
-// Очереди (создаются внутри задачи, регистрируются в DataRouter)
+static uint8_t       decodeBuf[OTA_DECODE_BUF_SIZE];
 static QueueHandle_t cmdQ       = NULL;
-static QueueHandle_t chunkPackQ = NULL;  // Бинарные пакеты OtaChunkPack
-
-// =============================================================================
-// otaStarting — флаг, что OTA ИНИЦИАЛИЗИРУЕТСЯ (ставится ДО создания задачи)
-// Нужен чтобы loop() НЕ перезапускал задачи, которые завершаются по CMD_OTA_START
-// =============================================================================
-
-static bool otaStarting = false;
-
-// =============================================================================
-// otaIsInProgress — проверяется loop() для блокировки рестартов
-// Возвращает true если OTA уже запущена ИЛИ только инициализируется
-// =============================================================================
-
-bool otaIsInProgress() {
-    return otaRunning || otaStarting;
-}
+static QueueHandle_t chunkPackQ = NULL;
 
 // =============================================================================
 // publishOtaResult — публикация pack номера в шину (для Protocol Task)
-//   pack > 0  — чанк успешно записан
-//   pack < 0  — ошибка (абсолютное значение = pack номер)
 // =============================================================================
 
 static void publishOtaResult(int pack) {
@@ -123,7 +101,15 @@ static void publishOtaResult(int pack) {
 }
 
 // =============================================================================
-// logHeapState — диагностика состояния кучи
+// otaIsInProgress — проверяется loop() для блокировки рестартов
+// =============================================================================
+
+bool otaIsInProgress() {
+    return otaActive;
+}
+
+// =============================================================================
+// logHeapState — диагностика
 // =============================================================================
 
 static void logHeapState(const char* label) {
@@ -145,11 +131,7 @@ static void processChunkPack(const OtaChunkPack* pack) {
         return;
     }
 
-#if DEBUG_LOG
-    pack->print();
-#endif
-
-    // Валидация пакета
+    // Валидация
     if (!pack->isValid()) {
         Serial.printf("[OTA] Invalid pack: pack=%u, len=%u\n",
                       pack->pack, pack->b64_len);
@@ -158,26 +140,18 @@ static void processChunkPack(const OtaChunkPack* pack) {
     }
 
     // Проверка последовательности
-    if (pack->pack != (uint16_t)expectedPack) {
-        if (pack->pack < (uint16_t)expectedPack) {
-            // Дубликат — подтверждаем (Android мог не получить ack)
+    if (pack->pack != expectedPack) {
+        if (pack->pack < expectedPack) {
             Serial.printf("[OTA] Duplicate pack %u (expected %u), re-ack\n",
                           pack->pack, expectedPack);
             publishOtaResult(pack->pack);
             return;
         }
-        // Пакет из будущего
         uint16_t gap = pack->pack - expectedPack;
         if (gap > 2) {
-            // Большой разрыв — возможно, сброс сессии
             Serial.printf("[OTA] Gap detected: expected %u, got %u (gap=%u)\n",
                           expectedPack, pack->pack, gap);
-        } else {
-            // Небольшой разрыв (1-2) — буферизуем и продолжаем
-            Serial.printf("[OTA] Out-of-order pack %u (expected %u), processing ahead\n",
-                          pack->pack, expectedPack);
         }
-        // Не return — обрабатываем пакет даже если out-of-order
     }
 
     // Декодируем base64
@@ -209,9 +183,8 @@ static void processChunkPack(const OtaChunkPack* pack) {
 
     otaWritten += written;
     expectedPack = pack->pack + 1;
-    lastChunkTime = millis();  // Сброс таймаута при успешной записи
+    lastChunkTime = millis();
 
-    // Публикуем успеш — Protocol Task сформирует JSON ack
     publishOtaResult(pack->pack);
 
     // Лог прогресса каждые 10%
@@ -225,36 +198,30 @@ static void processChunkPack(const OtaChunkPack* pack) {
 }
 
 // =============================================================================
-// otaTask — основная задача OTA
+// otaTask — Главная задача OTA
 // =============================================================================
 
 void otaTask(void* parameter) {
-    lastHeartbeat = millis();
-    otaRunning = true;
-    lastChunkTime = millis();
+    (void)parameter;
 
-    DataRouter& dr = DataRouter::getInstance();
+    TaskContext ctx;
+    if (!taskInit(&ctx, "OTA", &isRunningFlag, &lastHeartbeat)) return;
 
-    // Подписка на команды (ota_end)
-    cmdQ = xQueueCreate(3, sizeof(uint8_t));
-    dr.subscribe(TOPIC_CMD, cmdQ, QueuePolicy::FIFO_DROP);
+    // Очередь чанков создаётся позже — в otaBeginUpdate()
+    chunkPackQ = NULL;
 
-    // Подписка на бинарные пакеты OTA (OtaChunkPack)
-    chunkPackQ = xQueueCreate(3, sizeof(OtaChunkPack));  // Буфер из 3 чанков на случай всплеска
-    dr.subscribe(TOPIC_OTA_CHUNK_PACK, chunkPackQ, QueuePolicy::FIFO_DROP);
-
-    Serial.printf("[OTA] Task started. Size=%u bytes, chunks=%d\n",
-                  (unsigned)otaFirmwareSize, totalChunks);
+    Serial.println("[OTA] Task started, waiting for update...");
 
     while (1) {
-        lastHeartbeat = millis();
+        taskHeartbeat(&ctx);
 
-        // --- Команды (ota_end) ---
+        // Обработка команд
         if (cmdQ) {
             uint8_t cmd;
             while (xQueueReceive(cmdQ, &cmd, 0) == pdTRUE) {
                 if ((Command)cmd == CMD_OTA_END) {
-                    // Финализация
+                    // Android сказал "всё, завершай" — вызываем Update.end()
+                    // независимо от таймаута. Если что-то не так — Update.end() сам вернёт ошибку.
                     Serial.println("[OTA] CMD_OTA_END received, finalizing...");
                     if (!Update.end(true)) {
                         Serial.println("[OTA] Update.end() FAILED!");
@@ -267,112 +234,41 @@ void otaTask(void* parameter) {
                         ESP.restart();
                     }
                 }
+                // CMD_OTA_START — игнорируем (для других задач), OTA уже запущена
             }
         }
 
-        // --- Бинарные пакеты OTA (OtaChunkPack) ---
-        if (chunkPackQ) {
+        // Чанки данных (только когда OTA активна)
+        if (otaActive && chunkPackQ) {
             OtaChunkPack otaPack;
             while (xQueueReceive(chunkPackQ, &otaPack, 0) == pdTRUE) {
                 processChunkPack(&otaPack);
             }
         }
 
-        // --- Таймаут — если данных нет слишком долго ---
-        if (millis() - lastChunkTime > OTA_TIMEOUT_MS && otaWritten < otaFirmwareSize) {
+        // Таймаут
+        if (millis() - lastChunkTime > OTA_TIMEOUT_MS) {
             Serial.println("[OTA] TIMEOUT, aborting");
             Update.abort();
-            publishOtaResult(-998);  // Код таймаута
-            otaRunning = false;
-            otaTaskHandle = NULL;
-            vTaskDelete(NULL);
+            publishOtaResult(-998);
         }
 
-        vTaskDelay(10 / portTICK_PERIOD_MS);
+        vTaskDelay(otaActive ? 10 : 100 / portTICK_PERIOD_MS);
     }
 }
 
 // =============================================================================
-// otaTaskStart — инициализация и запуск OTA Task
+// otaTaskStart — вызывается из setup(), как все задачи
 // =============================================================================
 
-void otaTaskStart(size_t firmwareSize, int ackId) {
-    // Если OTA уже запущена или инициализируется — повторяем сигнал ota_init
-    if (otaTaskHandle || otaStarting) {
-        // -1 = маркер ota_init для Protocol
-        publishOtaResult(-1);
-        return;
+void otaTaskStart() {
+    if (!otaTaskHandle) {
+        lastHeartbeat = millis();
+        isRunningFlag = true;
+        // Ядро 1 — OTA (тот же приоритет что и Protocol)
+        xTaskCreatePinnedToCore(otaTask, "OTA", 8192, NULL, 3, &otaTaskHandle, 1);
+        Serial.println("[OTA] Started (8192 stack, P3, Core 1)");
     }
-
-    // СРАЗУ — чтобы loop() НЕ перезапускал задачи, которые сейчас завершатся
-    otaStarting = true;
-
-    otaFirmwareSize = firmwareSize;
-    otaWritten = 0;
-    expectedPack = 1;
-    lastChunkTime = 0;
-    totalChunks = (firmwareSize + OTA_CHUNK_BIN_SIZE - 1) / OTA_CHUNK_BIN_SIZE;
-
-    if (totalChunks > OTA_MAX_CHUNKS) {
-        Serial.printf("[OTA] Firmware too large: %u bytes (max ~%d KB)\n",
-                      (unsigned)firmwareSize, OTA_MAX_CHUNKS * OTA_CHUNK_BIN_SIZE / 1024);
-        return;
-    }
-
-    // =========================================================================
-    // Освобождение памяти перед Update.begin()
-    // Update.begin(firmwareSize) требует contiguous блок ~1.18 МБ.
-    // Публикуем CMD_OTA_START — каждая задача сама завершается:
-    //   - Simulator/RealEngine (физика автомобиля)
-    //   - Calculator (расчёт TripPack)
-    //   - K-Line (диагностика)
-    //   - Climate (климат)
-    //   - OLED (дисплей)
-    //   - Storage (NVS)
-    // DataRouter — только почтальон, не диспетчер.
-    // =========================================================================
-
-    Serial.println("[OTA] Sending CMD_OTA_START to all tasks...");
-    logHeapState("before");
-
-    DataRouter& dr = DataRouter::getInstance();
-    dr.publish(TOPIC_CMD, CMD_OTA_START);
-
-    // Задержка чтобы задачи успели завершиться (heartbeat < 3000 мс у всех)
-    delay(500);
-    logHeapState("after_tasks_shutdown");
-
-    // Очистка очередей телеметрии от накопленных данных
-    dr.drainTopic(TOPIC_ENGINE_PACK);
-    dr.drainTopic(TOPIC_TRIP_PACK);
-    dr.drainTopic(TOPIC_KLINE_PACK);
-    dr.drainTopic(TOPIC_CLIMATE_PACK);
-    dr.drainTopic(TOPIC_SETTINGS_PACK);
-    dr.drainTopic(TOPIC_MSG_INCOMING);
-    dr.drainTopic(TOPIC_MSG_OUTGOING);
-    dr.drainTopic(TOPIC_OTA_CHUNK_PACK);
-
-    logHeapState("after_drain");
-
-    // Инициализируем Update
-    if (!Update.begin(firmwareSize)) {
-        Serial.println("[OTA] Update.begin() FAILED!");
-        Update.printError(Serial);
-        logHeapState("update_begin_failed");
-        Serial.printf("[OTA] Required: %u bytes, Max alloc: %u bytes\n",
-                      (unsigned)firmwareSize, (unsigned)ESP.getMaxAllocHeap());
-        otaStarting = false;  // Разблокируем loop()
-        return;
-    }
-
-    Serial.printf("[OTA] Update initialized. Ready for %d chunks.\n", totalChunks);
-    logHeapState("update_begin_ok");
-
-    // Сигнал Protocol Task что OTA готова (он сформирует ota_init JSON)
-    publishOtaResult(-1);
-
-    // Ядро 1 (то же, что и Protocol)
-    xTaskCreatePinnedToCore(otaTask, "OTA", 4096, NULL, 3, &otaTaskHandle, 1);
 }
 
 // =============================================================================
@@ -383,15 +279,75 @@ void otaTaskStop() {
     if (otaTaskHandle) {
         vTaskDelete(otaTaskHandle);
         otaTaskHandle = NULL;
+        isRunningFlag = false;
     }
-    otaRunning = false;
 }
 
 // =============================================================================
-// otaTaskIsRunning — проверка активности задачи
+// otaTaskIsRunning — проверка активности
 // =============================================================================
 
 bool otaTaskIsRunning() {
-    return otaRunning && otaTaskHandle &&
-           (millis() - lastHeartbeat) < 5000;
+    return isRunningFlag && (millis() - lastHeartbeat) < 5000;
+}
+
+// =============================================================================
+// otaBeginUpdate — вызывается protocol_task при ota_update
+// Устанавливает параметры и активирует OTA
+// =============================================================================
+
+void otaBeginUpdate(size_t firmwareSize) {
+    // Запускаем OTA Task лениво — только когда действительно нужна OTA
+    // Это экономит ~8 KB RAM на старте (стековый буфер задачи)
+    if (!otaTaskHandle) {
+        lastHeartbeat = millis();
+        isRunningFlag = true;
+        chunkPackQ = NULL;
+        xTaskCreatePinnedToCore(otaTask, "OTA", 3072, NULL, 3, &otaTaskHandle, 1);
+        // Даём задаче время инициализироваться
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+
+    otaFirmwareSize = firmwareSize;
+    otaWritten = 0;
+    expectedPack = 1;
+    lastChunkTime = millis();
+
+    // Создаём очередь чанков — QUEUE_OVERWRITE, depth=1
+    DataRouter& dr = DataRouter::getInstance();
+    if (chunkPackQ) {
+        vQueueDelete(chunkPackQ);
+        chunkPackQ = NULL;
+    }
+    chunkPackQ = xQueueCreate(1, sizeof(OtaChunkPack));
+    if (!chunkPackQ) {
+        Serial.println("[OTA] ERROR: Failed to create chunk queue in otaBeginUpdate!");
+        return;
+    }
+    dr.subscribe(TOPIC_OTA_CHUNK_PACK, chunkPackQ, QueuePolicy::FIFO_DROP);
+
+    // Drain очередей от старых данных
+    dr.drainTopic(TOPIC_OTA_CHUNK_PACK);
+
+    logHeapState("before");
+
+    if (!Update.begin(firmwareSize)) {
+        Serial.println("[OTA] Update.begin() FAILED!");
+        Update.printError(Serial);
+        logHeapState("update_begin_failed");
+        return;
+    }
+
+    otaActive = true;
+    logHeapState("update_begin_ok");
+    Serial.printf("[OTA] Update initialized. Ready for %d chunks.\n",
+                  (firmwareSize + OTA_CHUNK_BIN_SIZE - 1) / OTA_CHUNK_BIN_SIZE);
+}
+
+// =============================================================================
+// otaIsReady — OTA Task готова принять чанки
+// =============================================================================
+
+bool otaIsReady() {
+    return otaActive;
 }
