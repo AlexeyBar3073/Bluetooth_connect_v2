@@ -68,7 +68,17 @@ static struct {
     uint8_t inj_cnt = 4, kl_proto = 0;
 } cfg;
 
+// --- OTA состояние (для формирования ota_init и ack) ---
+static struct {
+    int totalChunks = 0;
+    int chunkSize = OTA_CHUNK_BIN_SIZE;
+} ota;
+
 static char outBuffer[512];
+
+// Буфер для входящих JSON — статический (не на стеке), 2048 байт
+// OTA-чанк JSON ~1420 байт (bin=1368 base64 + pack + ack_id)
+static char rxIncomingBuffer[2048];
 
 // =============================================================================
 // processEnginePack
@@ -193,15 +203,16 @@ static void publishOutgoing(JsonDocument& doc) {
 // =============================================================================
 
 static void processIncoming(QueueHandle_t q) {
-    char rxBuffer[512];
-    while (xQueueReceive(q, rxBuffer, 0) == pdTRUE) {
+    while (xQueueReceive(q, rxIncomingBuffer, 0) == pdTRUE) {
 
         JsonDocument doc;
-        if (deserializeJson(doc, rxBuffer)) {
-            Serial.printf("[Proto] JSON parse error: %s\n", rxBuffer);
-            JsonDocument err;
-            err["error"] = "Invalid JSON";
-            publishOutgoing(err);
+        DeserializationError err = deserializeJson(doc, rxIncomingBuffer);
+        if (err) {
+            Serial.printf("[Proto] JSON parse error: %s (free heap: %d)\n",
+                          err.c_str(), (int)ESP.getFreeHeap());
+            JsonDocument resp;
+            resp["error"] = "Invalid JSON";
+            publishOutgoing(resp);
             continue;
         }
 
@@ -271,7 +282,11 @@ static void processIncoming(QueueHandle_t q) {
                 isStreamingActive = false;
                 Serial.println("[Proto] Telemetry stopped, calling otaTaskStart...");
 
-                // OTA Task сам отправит ota_init + ack_id одним пакетом
+                // Сохраняем для ota_init ответа
+                ota.totalChunks = (fwSize + OTA_CHUNK_BIN_SIZE - 1) / OTA_CHUNK_BIN_SIZE;
+                ota.chunkSize = OTA_CHUNK_BIN_SIZE;
+
+                // OTA Task сам опубликует ota_init через DataRouter
                 otaTaskStart((size_t)fwSize, lastMsgId);
             } else {
                 Serial.println("[Proto] ota_update: INVALID SIZE");
@@ -282,20 +297,18 @@ static void processIncoming(QueueHandle_t q) {
             continue;
         }
 
-        // --- ota_data — порция данных прошивки → TOPIC_OTA_CHUNK ---
+        // --- ota_data — порция данных прошивки → только bin в шину → СРАЗУ ack_id ---
         if (strcmp(cmd, "ota_data") == 0) {
             int pack = doc["data"]["pack"];
             const char* b64 = doc["data"]["bin"];
             if (b64 && pack > 0) {
-                // Пересылаем в OTA Task, включая ack_id (msg_id входящего сообщения)
-                JsonDocument chunkDoc;
-                chunkDoc["pack"] = pack;
-                chunkDoc["bin"] = b64;
-                chunkDoc["ack_id"] = lastMsgId;
-                char chunkBuf[OTA_DECODE_BUF_SIZE + 128];
-                serializeJson(chunkDoc, chunkBuf, sizeof(chunkBuf));
-                DataRouter::getInstance().publishString(TOPIC_OTA_CHUNK, chunkBuf);
+                // Передаём ТОЛЬКО base64 строку в OTA Task (он сам декодирует)
+                DataRouter::getInstance().publishString(TOPIC_OTA_CHUNK, b64);
             }
+            // ack_id — БЕЗУСЛОВНЫЙ ответ, не ждём OTA
+            JsonDocument ack;
+            ack["ack_id"] = lastMsgId;
+            publishOutgoing(ack);
             continue;
         }
 
@@ -463,6 +476,10 @@ void protocolTask(void* parameter) {
     QueueHandle_t incomingQ = xQueueCreate(1, 2048);
     dr.subscribe(TOPIC_MSG_INCOMING, incomingQ, QueuePolicy::OVERWRITE);
 
+    // Подписка на результат OTA (pack номер от OTA Task)
+    QueueHandle_t otaResultQ = xQueueCreate(3, sizeof(int));
+    dr.subscribe(TOPIC_OTA_RESULT, otaResultQ, QueuePolicy::FIFO_DROP);
+
 #if DEBUG_LOG
     Serial.println("[Protocol] Task started (DataRouter, Fractional: FAST 100ms, TRIP 500ms, SERVICE 1000ms)");
 #endif
@@ -480,6 +497,35 @@ void protocolTask(void* parameter) {
         if (settingsQ) processSettingsPack(settingsQ);
 
         if (incomingQ) processIncoming(incomingQ);
+
+        // --- Результат OTA (pack номер от OTA Task) ---
+        if (otaResultQ) {
+            int otaPack;
+            while (xQueueReceive(otaResultQ, &otaPack, 0) == pdTRUE) {
+                if (otaPack == -1) {
+                    // ota_init — OTA Task готова к приёму
+                    JsonDocument doc;
+                    doc["ack_id"] = lastMsgId;
+                    doc["ota_init"].to<JsonObject>()["size"]  = ota.chunkSize;
+                    doc["ota_init"].to<JsonObject>()["count"] = ota.totalChunks;
+                    publishOutgoing(doc);
+                    Serial.printf("[Proto] ota_init sent: chunkSize=%d, count=%d, ack_id=%d\n",
+                                  ota.chunkSize, ota.totalChunks, lastMsgId);
+                } else if (otaPack > 0) {
+                    // Успешная запись чанка — отправляем ack
+                    JsonDocument doc;
+                    doc["ota_read"] = otaPack;
+                    doc["ack_id"] = lastMsgId;
+                    publishOutgoing(doc);
+                } else {
+                    // Ошибка (абсолютное значение = pack номер)
+                    JsonDocument doc;
+                    doc["ota_error"] = "flash_write_failed";
+                    publishOutgoing(doc);
+                    Serial.printf("[Proto] OTA error at pack %d\n", -otaPack);
+                }
+            }
+        }
 
         if (!isStreamingActive) {
             vTaskDelay(10 / portTICK_PERIOD_MS);
