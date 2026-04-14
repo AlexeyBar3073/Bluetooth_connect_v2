@@ -247,9 +247,10 @@ void otaTask(void* parameter) {
         }
 
         // Таймаут
-        if (millis() - lastChunkTime > OTA_TIMEOUT_MS) {
+        if (otaActive && (millis() - lastChunkTime > OTA_TIMEOUT_MS)) {
             Serial.println("[OTA] TIMEOUT, aborting");
             Update.abort();
+            otaActive = false;
             publishOtaResult(-998);
         }
 
@@ -297,6 +298,14 @@ bool otaTaskIsRunning() {
 // =============================================================================
 
 void otaBeginUpdate(size_t firmwareSize) {
+    // Если предыдущая OTA ещё активна — принудительно завершаем
+    if (otaActive) {
+        Serial.println("[OTA] Previous OTA still active, aborting...");
+        Update.abort();
+        otaActive = false;
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+
     // Запускаем OTA Task лениво — только когда действительно нужна OTA
     // Это экономит ~8 KB RAM на старте (стековый буфер задачи)
     if (!otaTaskHandle) {
