@@ -39,13 +39,13 @@
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
 // MINOR (8) — OTA Task + BT transport оптимизация
-// BUILD (13) — OtaChunkPack: типизированный пакет + CRC16 verify
+// BUILD (14) — OTA: timeout, bt_transport watermark/backpressure, ota_replay
 //
 #define FW_VERSION_MAJOR 6
 #define FW_VERSION_MINOR 8
-#define FW_VERSION_BUILD 13
-#define FW_VERSION_STR   "6.8.13"
-#define FW_VERSION_NOTE  "OTA: typed OtaChunkPack + CRC16 integrity"
+#define FW_VERSION_BUILD 14
+#define FW_VERSION_STR   "6.8.14"
+#define FW_VERSION_NOTE  "OTA: full reliability stack (timeout, CRC, watermark, replay)"
 
 // =============================================================================
 // Аппаратные пины

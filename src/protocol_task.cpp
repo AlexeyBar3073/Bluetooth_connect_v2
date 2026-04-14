@@ -538,11 +538,12 @@ void protocolTask(void* parameter) {
                     doc["ack_id"] = lastMsgId;
                     publishOutgoing(doc);
                 } else {
-                    // Ошибка (абсолютное значение = pack номер)
+                    // Ошибка (абсолютное значение = pack номер) — запросить повтор
                     JsonDocument doc;
-                    doc["ota_error"] = "flash_write_failed";
+                    JsonObject replay = doc["ota_replay"].to<JsonObject>();
+                    replay["pack"] = -otaPack;
                     publishOutgoing(doc);
-                    Serial.printf("[Proto] OTA error at pack %d\n", -otaPack);
+                    Serial.printf("[Proto] OTA replay requested for pack %d\n", -otaPack);
                 }
             }
         }

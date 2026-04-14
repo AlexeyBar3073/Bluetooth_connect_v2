@@ -69,6 +69,17 @@ typedef struct {
     bool isValid() const {
         return pack > 0 && b64_len > 0 && b64_len <= OTA_CHUNK_B64_SIZE && b64[b64_len] == '\0';
     }
+
+#if DEBUG_LOG
+    void print() const {
+        char preview[12];
+        size_t n = (b64_len < 10) ? b64_len : 10;
+        memcpy(preview, b64, n);
+        preview[n] = '\0';
+        Serial.printf("[OtaChunk] pack=%u, crc=%04X, len=%u, preview=\"%s\"\n",
+                      pack, crc16, b64_len, preview);
+    }
+#endif
 } OtaChunkPack;
 #pragma pack(pop)
 

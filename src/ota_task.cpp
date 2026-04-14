@@ -100,6 +100,8 @@ static size_t        otaWritten     = 0;
 static int           expectedPack   = 1;     // Ожидаемый номер пакета (начинаем с 1)
 static int           totalChunks    = 0;
 static uint8_t       decodeBuf[OTA_DECODE_BUF_SIZE];
+static unsigned long lastChunkTime  = 0;
+#define OTA_TIMEOUT_MS 5000  // 5 секунд без данных — таймаут
 
 // Очереди (создаются внутри задачи, регистрируются в DataRouter)
 static QueueHandle_t cmdQ       = NULL;
@@ -146,6 +148,10 @@ static void processChunkPack(const OtaChunkPack* pack) {
         return;
     }
 
+#if DEBUG_LOG
+    pack->print();
+#endif
+
     // Валидация пакета
     if (!pack->isValid()) {
         Serial.printf("[OTA] Invalid pack: pack=%u, len=%u\n",
@@ -163,9 +169,18 @@ static void processChunkPack(const OtaChunkPack* pack) {
             publishOtaResult(pack->pack);
             return;
         }
-        // Будущий пакет — всё равно обрабатываем (OTA не ждёт retransmit)
-        Serial.printf("[OTA] Out-of-order pack %u (expected %u)\n",
-                      pack->pack, expectedPack);
+        // Пакет из будущего
+        uint16_t gap = pack->pack - expectedPack;
+        if (gap > 2) {
+            // Большой разрыв — возможно, сброс сессии
+            Serial.printf("[OTA] Gap detected: expected %u, got %u (gap=%u)\n",
+                          expectedPack, pack->pack, gap);
+        } else {
+            // Небольшой разрыв (1-2) — буферизуем и продолжаем
+            Serial.printf("[OTA] Out-of-order pack %u (expected %u), processing ahead\n",
+                          pack->pack, expectedPack);
+        }
+        // Не return — обрабатываем пакет даже если out-of-order
     }
 
     // Декодируем base64
@@ -197,6 +212,7 @@ static void processChunkPack(const OtaChunkPack* pack) {
 
     otaWritten += written;
     expectedPack = pack->pack + 1;
+    lastChunkTime = millis();  // Сброс таймаута при успешной записи
 
     // Публикуем успеш — Protocol Task сформирует JSON ack
     publishOtaResult(pack->pack);
@@ -218,6 +234,7 @@ static void processChunkPack(const OtaChunkPack* pack) {
 void otaTask(void* parameter) {
     lastHeartbeat = millis();
     otaRunning = true;
+    lastChunkTime = millis();
 
     DataRouter& dr = DataRouter::getInstance();
 
@@ -264,6 +281,16 @@ void otaTask(void* parameter) {
             }
         }
 
+        // --- Таймаут — если данных нет слишком долго ---
+        if (millis() - lastChunkTime > OTA_TIMEOUT_MS && otaWritten < otaFirmwareSize) {
+            Serial.println("[OTA] TIMEOUT, aborting");
+            Update.abort();
+            publishOtaResult(-998);  // Код таймаута
+            otaRunning = false;
+            otaTaskHandle = NULL;
+            vTaskDelete(NULL);
+        }
+
         vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 }
@@ -283,6 +310,7 @@ void otaTaskStart(size_t firmwareSize, int ackId) {
     otaFirmwareSize = firmwareSize;
     otaWritten = 0;
     expectedPack = 1;
+    lastChunkTime = 0;
     totalChunks = (firmwareSize + OTA_CHUNK_BIN_SIZE - 1) / OTA_CHUNK_BIN_SIZE;
 
     if (totalChunks > OTA_MAX_CHUNKS) {

@@ -9,9 +9,15 @@
 // Не знает про телеметрию, команды, OTA.
 //
 // Ключевой принцип: RX имеет приоритет над парсингом. Цикл обработки
-// ограничен PARSE_CHUNK_SIZE, чтобы быстро возвращаться к SerialBT.read().
+// ограничен адаптивным размером чанка, чтобы быстро возвращаться к SerialBT.read().
 //
-// ВЕРСИЯ: 6.8.6 — Без мьютексов: весь TX через DataRouter (TOPIC_MSG_OUTGOING)
+// Оптимизации для OTA:
+//   - Watermark контроль (30%/70%/90%) — backpressure при переполнении
+//   - Адаптивный размер парсинга (512-4096) — быстрее при больших данных
+//   - TX-очередь 2048 байт — пиковые нагрузки OTA-чанков
+//   - Динамическая задержка — 0 при >70% заполнения
+//
+// ВЕРСИЯ: 6.8.14 — BT Transport: watermark, backpressure, adaptive parse
 // -----------------------------------------------------------------------------
 
 #include "bt_transport.h"
@@ -22,7 +28,7 @@
 static BluetoothSerial SerialBT;
 
 // =============================================================================
-// Ring Buffer — общий, 8KB для burst-proof
+// Ring Buffer — 8KB для burst-proof
 // =============================================================================
 
 #define RX_RING_SIZE  8192
@@ -31,20 +37,30 @@ static uint8_t rxRing[RX_RING_SIZE];
 static size_t rxHead = 0;
 static size_t rxTail = 0;
 
-inline void rbPush(uint8_t c) {
+// =============================================================================
+// Watermark контроль и backpressure
+// =============================================================================
+
+#define RX_WATERMARK_LOW   (RX_RING_SIZE * 3 / 10)  // 30% — можно принимать
+#define RX_WATERMARK_HIGH  (RX_RING_SIZE * 7 / 10)  // 70% — пора притормозить
+#define RX_WATERMARK_CRIT  (RX_RING_SIZE * 9 / 10)  // 90% — аварийный сброс
+
+static bool rxBackpressure = false;  // Флаг паузы приёма
+
+inline size_t rbUsed() {
+    return (rxHead >= rxTail) ? (rxHead - rxTail) : (RX_RING_SIZE - rxTail + rxHead);
+}
+
+inline size_t rbFree() {
+    return RX_RING_SIZE - rbUsed() - 1;
+}
+
+inline bool rbPush(uint8_t c) {
     size_t next = (rxHead + 1) % RX_RING_SIZE;
-    if (next != rxTail) {
-        rxRing[rxHead] = c;
-        rxHead = next;
-    } else {
-        // Переполнение — сдвигаем хвост (перезапись старых данных)
-        rxTail = (rxTail + 1) % RX_RING_SIZE;
-        rxRing[rxHead] = c;
-        rxHead = next;
-#if DEBUG_LOG
-        Serial.println("[BT RX] Ring overflow");
-#endif
-    }
+    if (next == rxTail) return false;  // Переполнение — не перезаписываем
+    rxRing[rxHead] = c;
+    rxHead = next;
+    return true;
 }
 
 inline bool rbPop(uint8_t &c) {
@@ -55,10 +71,18 @@ inline bool rbPop(uint8_t &c) {
 }
 
 // =============================================================================
-// Chunked processing — макс. байт за один проход парсера
+// Адаптивный размер парсинга
 // =============================================================================
 
-#define PARSE_CHUNK_SIZE 1024
+#define PARSE_CHUNK_MIN  512
+#define PARSE_CHUNK_MAX  4096
+
+inline size_t getAdaptiveParseChunk() {
+    size_t used = rbUsed();
+    if (used > RX_WATERMARK_CRIT) return PARSE_CHUNK_MAX;
+    if (used > RX_WATERMARK_HIGH)  return PARSE_CHUNK_MAX / 2;
+    return PARSE_CHUNK_MIN;
+}
 
 // =============================================================================
 // Состояние задачи
@@ -80,19 +104,18 @@ void btTransportTask(void* parameter) {
     DataRouter& dr = DataRouter::getInstance();
 
     // Исходящие данные (OVERWRITE — не блокируем отправку)
-    txQueue = xQueueCreate(1, 512);
+    txQueue = xQueueCreate(1, 2048);  // Увеличено до 2048 для пиковых нагрузок OTA
     dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::OVERWRITE);
 
     // Временный буфер для чтения из BT
     uint8_t temp[512];
 
-    // Буфер для сборки строки (статический — не на стеке)
-    // 4096 — достаточно для OTA-чанка JSON (~1420 байт при bin=1368 base64)
-    static char lineBuffer[4096];
+    // Буфер для сборки строки — 2048 достаточно для OTA-чанка JSON (~1450 байт)
+    static char lineBuffer[2048];
     static size_t linePos = 0;
 
 #if DEBUG_LOG
-    Serial.println("[BT Transport] Task running (chunked RX-first)");
+    Serial.println("[BT Transport] Task running (watermark, adaptive parse)");
 #endif
 
     while (1) {
@@ -105,20 +128,33 @@ void btTransportTask(void* parameter) {
             dr.publish(TOPIC_TRANSPORT_STATUS, isConnected);
         }
 
-        // --- 2. RX: Чтение из Bluetooth (ПРИОРИТЕТ №1) ---
-        if (isConnected && SerialBT.available()) {
-            size_t len = SerialBT.readBytes((char*)temp, sizeof(temp));
-            for (size_t i = 0; i < len; i++) {
-                rbPush(temp[i]);
+        // --- 2. RX: Чтение из Bluetooth (ПРИОРИТЕТ №1, backpressure-aware) ---
+        if (isConnected && !rxBackpressure && SerialBT.available()) {
+            size_t available = SerialBT.available();
+            size_t toRead = (available > sizeof(temp)) ? sizeof(temp) : available;
+            if (toRead > rbFree()) toRead = rbFree();  // Не читать больше свободного места
+
+            if (toRead > 0) {
+                size_t actuallyRead = SerialBT.readBytes((char*)temp, toRead);
+                for (size_t i = 0; i < actuallyRead; i++) {
+                    if (!rbPush(temp[i])) {
+                        rxBackpressure = true;
+#if DEBUG_LOG
+                        Serial.printf("[BT] Buffer full (%d/%d), backpressure ON\n",
+                                     (int)rbUsed(), RX_RING_SIZE);
+#endif
+                        break;
+                    }
+                }
             }
-            // Сразу возвращаемся к началу while(1) — читаем дальше
         }
 
-        // --- 3. Парсинг: порционный (не более PARSE_CHUNK_SIZE за проход) ---
+        // --- 3. Парсинг: адаптивный размер ---
+        size_t parseLimit = getAdaptiveParseChunk();
         int processed = 0;
         uint8_t c;
 
-        while (rbPop(c) && processed < PARSE_CHUNK_SIZE) {
+        while (rbPop(c) && processed < (int)parseLimit) {
             processed++;
 
             if (c == '\r') continue;
@@ -148,17 +184,25 @@ void btTransportTask(void* parameter) {
             }
         }
 
+        // --- Backpressure: возобновление при draining ---
+        if (rxBackpressure && rbUsed() < RX_WATERMARK_LOW) {
+            rxBackpressure = false;
+#if DEBUG_LOG
+            Serial.println("[BT] Buffer drained, backpressure OFF");
+#endif
+        }
+
         // --- 4. TX: TOPIC_MSG_OUTGOING → Android (без ожидания) ---
         if (isConnected && txQueue) {
-            char txBuffer[512];
+            char txBuffer[2048];  // Увеличено до 2048
             if (xQueueReceive(txQueue, txBuffer, 0) == pdTRUE) {
                 SerialBT.print(txBuffer);
                 SerialBT.print('\n');
             }
         }
 
-        // Пауза 1 тик — даём другим задачам поработать
-        vTaskDelay(1);
+        // --- Динамическая задержка: 0 при >70% заполнения, иначе 1 тик ---
+        vTaskDelay(rbUsed() > RX_WATERMARK_HIGH ? 0 : 1);
     }
 }
 
