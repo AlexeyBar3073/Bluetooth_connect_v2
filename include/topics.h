@@ -145,6 +145,12 @@ enum Topic : uint8_t {
     // Кто подписан: Protocol Task (формирование JSON ack для Android).
     // Политика: QUEUE_FIFO_DROP, depth=3 (буфер для нескольких результатов).
 
+    TOPIC_OTA_CHUNK_PACK   = 0xF9,
+    // OtaChunkPack (1375 байт) — бинарный пакет OTA-данных.
+    // Кто публикует: Protocol Task (извлёк bin из ota_data JSON → OtaChunkPack).
+    // Кто подписан: OTA Task (base64_decode → CRC16 verify → запись во flash).
+    // Политика: QUEUE_FIFO_DROP, depth=3 (буфер на случай всплеска).
+
     TOPIC_COUNT  // Общее количество топиков (для массивов, циклов)
 };
 

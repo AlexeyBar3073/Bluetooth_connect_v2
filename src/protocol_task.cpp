@@ -297,14 +297,34 @@ static void processIncoming(QueueHandle_t q) {
             continue;
         }
 
-        // --- ota_data — порция данных прошивки → только bin в шину → СРАЗУ ack_id ---
+        // --- ota_data — порция данных прошивки → OtaChunkPack в шину → СРАЗУ ack_id ---
         if (strcmp(cmd, "ota_data") == 0) {
             int pack = doc["data"]["pack"];
             const char* b64 = doc["data"]["bin"];
-            if (b64 && pack > 0) {
-                // Передаём ТОЛЬКО base64 строку в OTA Task (он сам декодирует)
-                DataRouter::getInstance().publishString(TOPIC_OTA_CHUNK, b64);
+
+            // Извлекаем CRC16 если есть (Android может не отправлять для старых версий)
+            uint16_t crc = 0;
+            if (doc["data"]["crc16"].is<uint16_t>()) {
+                crc = doc["data"]["crc16"].as<uint16_t>();
             }
+
+            if (b64 && pack > 0 && strlen(b64) <= OTA_CHUNK_B64_SIZE) {
+                // Формируем типизированный пакет
+                OtaChunkPack otaPack;
+                otaPack.pack = static_cast<uint16_t>(pack);
+                otaPack.crc16 = crc;
+                otaPack.b64_len = static_cast<uint16_t>(strlen(b64));
+                memcpy(otaPack.b64, b64, otaPack.b64_len);
+                otaPack.b64[otaPack.b64_len] = '\0';  // Нуль-терминатор
+
+                // Публикуем через механизм пакетов (прямой memcpy в очередь)
+                DataRouter::getInstance().publishPacket(
+                    TOPIC_OTA_CHUNK_PACK,
+                    &otaPack,
+                    sizeof(OtaChunkPack)
+                );
+            }
+
             // ack_id — БЕЗУСЛОВНЫЙ ответ, не ждём OTA
             JsonDocument ack;
             ack["ack_id"] = lastMsgId;

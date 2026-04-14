@@ -39,13 +39,13 @@
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
 // MINOR (8) — OTA Task + BT transport оптимизация
-// BUILD (12) — OTA: освобождение кучи перед Update.begin()
+// BUILD (13) — OtaChunkPack: типизированный пакет + CRC16 verify
 //
 #define FW_VERSION_MAJOR 6
 #define FW_VERSION_MINOR 8
-#define FW_VERSION_BUILD 12
-#define FW_VERSION_STR   "6.8.12"
-#define FW_VERSION_NOTE  "OTA: heap cleanup before Update.begin()"
+#define FW_VERSION_BUILD 13
+#define FW_VERSION_STR   "6.8.13"
+#define FW_VERSION_NOTE  "OTA: typed OtaChunkPack + CRC16 integrity"
 
 // =============================================================================
 // Аппаратные пины

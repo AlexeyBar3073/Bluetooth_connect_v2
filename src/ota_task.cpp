@@ -4,17 +4,17 @@
 //
 // Жизненный цикл:
 //   otaTaskStart(firmwareSize)  → создаёт задачу, инициализирует Update
-//   OTA Task подписывается на TOPIC_OTA_CHUNK (string — base64 данные прошивки)
-//   Декодирует base64 → пишет во flash → публикует pack номер в TOPIC_OTA_RESULT
+//   OTA Task подписывается на TOPIC_OTA_CHUNK_PACK (OtaChunkPack — бинарный пакет)
+//   Декодирует base64 → CRC16 verify → пишет во flash → публикует pack в TOPIC_OTA_RESULT
 //   Protocol Task принимает результат → формирует JSON ack → Android
 //   При ota_end (TOPIC_CMD) → Update.end() → ESP.restart()
 //
-// OTA Task получает ТОЛЬКО base64 строку (без JSON обёртки).
-// Protocol Task извлёк bin из JSON, передал OTA, ответил ack.
+// OTA Task получает типизированный OtaChunkPack (без JSON обёртки, без парсинга строк).
+// Protocol Task извлёк bin из JSON, сформировал OtaChunkPack, передал OTA.
 //
 // ПАМЯТЬ: Перед Update.begin() останавливаются лишние задачи и освобождается куча.
 //
-// ВЕРСИЯ: 6.8.12 — OTA: освобождение кучи перед Update.begin()
+// ВЕРСИЯ: 6.8.13 — OtaChunkPack: типизированный пакет + CRC16 verify
 // -----------------------------------------------------------------------------
 
 #include "ota_task.h"
@@ -33,6 +33,25 @@ extern void calculatorStop();
 extern void klineStop();
 extern void climateStop();
 extern void oledStop();
+
+// =============================================================================
+// CRC16 — полином 0xA001 (CRC-16-IBM), стандарт для embedded
+// =============================================================================
+
+static uint16_t crc16(const uint8_t* data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return crc;
+}
 
 // =============================================================================
 // Base64-декодер (OTA Task сам декодирует)
@@ -83,8 +102,8 @@ static int           totalChunks    = 0;
 static uint8_t       decodeBuf[OTA_DECODE_BUF_SIZE];
 
 // Очереди (создаются внутри задачи, регистрируются в DataRouter)
-static QueueHandle_t cmdQ      = NULL;
-static QueueHandle_t chunkQ    = NULL;
+static QueueHandle_t cmdQ       = NULL;
+static QueueHandle_t chunkPackQ = NULL;  // Бинарные пакеты OtaChunkPack
 
 // =============================================================================
 // otaIsInProgress — проверяется loop() для блокировки рестартов
@@ -117,48 +136,78 @@ static void logHeapState(const char* label) {
 }
 
 // =============================================================================
-// processChunk — обработка одного чанка (только base64 строка, без JSON)
+// processChunkPack — обработка одного бинарного пакета OTA
 // =============================================================================
 
-static void processChunk(const char* b64Str) {
-    if (!b64Str || !*b64Str) {
-        Serial.printf("[OTA] Empty base64 data\n");
+static void processChunkPack(const OtaChunkPack* pack) {
+    if (!pack) {
+        Serial.println("[OTA] NULL pack received");
         publishOtaResult(-1);
         return;
     }
 
+    // Валидация пакета
+    if (!pack->isValid()) {
+        Serial.printf("[OTA] Invalid pack: pack=%u, len=%u\n",
+                      pack->pack, pack->b64_len);
+        publishOtaResult(-pack->pack);
+        return;
+    }
+
     // Проверка последовательности
-    int currentPack = expectedPack;
+    if (pack->pack != (uint16_t)expectedPack) {
+        if (pack->pack < (uint16_t)expectedPack) {
+            // Дубликат — подтверждаем (Android мог не получить ack)
+            Serial.printf("[OTA] Duplicate pack %u (expected %u), re-ack\n",
+                          pack->pack, expectedPack);
+            publishOtaResult(pack->pack);
+            return;
+        }
+        // Будущий пакет — всё равно обрабатываем (OTA не ждёт retransmit)
+        Serial.printf("[OTA] Out-of-order pack %u (expected %u)\n",
+                      pack->pack, expectedPack);
+    }
 
     // Декодируем base64
-    int decodedLen = b64Decode(b64Str, decodeBuf);
+    int decodedLen = b64Decode(pack->b64, decodeBuf);
     if (decodedLen <= 0) {
-        Serial.printf("[OTA] Base64 decode failed for pack %d\n", currentPack);
-        publishOtaResult(-currentPack);
+        Serial.printf("[OTA] Base64 decode failed for pack %u\n", pack->pack);
+        publishOtaResult(-pack->pack);
         return;
+    }
+
+    // Проверяем CRC16 если он был передан
+    if (pack->crc16 != 0) {
+        uint16_t calcCrc = crc16(decodeBuf, decodedLen);
+        if (calcCrc != pack->crc16) {
+            Serial.printf("[OTA] CRC16 mismatch pack %u: %04X vs %04X\n",
+                          pack->pack, calcCrc, pack->crc16);
+            publishOtaResult(-pack->pack);
+            return;
+        }
     }
 
     // Пишем во flash
     size_t written = Update.write(decodeBuf, decodedLen);
     if (written != (size_t)decodedLen) {
-        Serial.printf("[OTA] Flash write failed at pack %d\n", currentPack);
-        publishOtaResult(-currentPack);
+        Serial.printf("[OTA] Flash write failed at pack %u\n", pack->pack);
+        publishOtaResult(-pack->pack);
         return;
     }
 
     otaWritten += written;
-    expectedPack++;
+    expectedPack = pack->pack + 1;
 
     // Публикуем успеш — Protocol Task сформирует JSON ack
-    publishOtaResult(currentPack);
+    publishOtaResult(pack->pack);
 
     // Лог прогресса каждые 10%
     int progress = (int)((otaWritten * 100) / otaFirmwareSize);
     static int lastLog = 0;
     if (progress - lastLog >= 10) {
         lastLog = progress;
-        Serial.printf("[OTA] Progress: %d%% (%u/%u bytes)\n",
-                      progress, (unsigned)otaWritten, (unsigned)otaFirmwareSize);
+        Serial.printf("[OTA] Progress: %d%% (%u/%u bytes), pack %u\n",
+                      progress, (unsigned)otaWritten, (unsigned)otaFirmwareSize, pack->pack);
     }
 }
 
@@ -176,9 +225,9 @@ void otaTask(void* parameter) {
     cmdQ = xQueueCreate(3, sizeof(uint8_t));
     dr.subscribe(TOPIC_CMD, cmdQ, QueuePolicy::FIFO_DROP);
 
-    // Подписка на чанки данных (string — base64 данные прошивки)
-    chunkQ = xQueueCreate(1, OTA_CHUNK_B64_SIZE + 64);
-    dr.subscribe(TOPIC_OTA_CHUNK, chunkQ, QueuePolicy::FIFO_DROP);
+    // Подписка на бинарные пакеты OTA (OtaChunkPack)
+    chunkPackQ = xQueueCreate(3, sizeof(OtaChunkPack));  // Буфер из 3 чанков на случай всплеска
+    dr.subscribe(TOPIC_OTA_CHUNK_PACK, chunkPackQ, QueuePolicy::FIFO_DROP);
 
     Serial.printf("[OTA] Task started. Size=%u bytes, chunks=%d\n",
                   (unsigned)otaFirmwareSize, totalChunks);
@@ -207,11 +256,11 @@ void otaTask(void* parameter) {
             }
         }
 
-        // --- Чанки данных (только base64 строка) ---
-        if (chunkQ) {
-            char chunkBuf[OTA_CHUNK_B64_SIZE + 64];
-            while (xQueueReceive(chunkQ, chunkBuf, 0) == pdTRUE) {
-                processChunk(chunkBuf);
+        // --- Бинарные пакеты OTA (OtaChunkPack) ---
+        if (chunkPackQ) {
+            OtaChunkPack otaPack;
+            while (xQueueReceive(chunkPackQ, &otaPack, 0) == pdTRUE) {
+                processChunkPack(&otaPack);
             }
         }
 
@@ -283,6 +332,7 @@ void otaTaskStart(size_t firmwareSize, int ackId) {
     dr.drainTopic(TOPIC_SETTINGS_PACK);
     dr.drainTopic(TOPIC_MSG_INCOMING);
     dr.drainTopic(TOPIC_MSG_OUTGOING);
+    dr.drainTopic(TOPIC_OTA_CHUNK_PACK);
 
     logHeapState("after_drain");
 
