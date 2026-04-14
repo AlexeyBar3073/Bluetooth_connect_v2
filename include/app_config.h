@@ -39,13 +39,13 @@
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
 // MINOR (8) — OTA Task + BT transport оптимизация
-// BUILD (14) — OTA: timeout, bt_transport watermark/backpressure, ota_replay
+// BUILD (15) — CMD_OTA_START: задачи завершаются сами через DataRouter
 //
 #define FW_VERSION_MAJOR 6
 #define FW_VERSION_MINOR 8
-#define FW_VERSION_BUILD 14
-#define FW_VERSION_STR   "6.8.14"
-#define FW_VERSION_NOTE  "OTA: full reliability stack (timeout, CRC, watermark, replay)"
+#define FW_VERSION_BUILD 15
+#define FW_VERSION_STR   "6.8.15"
+#define FW_VERSION_NOTE  "OTA: CMD_OTA_START — self-shutdown via DataRouter"
 
 // =============================================================================
 // Аппаратные пины

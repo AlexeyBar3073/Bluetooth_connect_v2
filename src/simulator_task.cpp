@@ -126,7 +126,8 @@ static float getInstantFuel() {
 // =============================================================================
 //
 // Читает все доступные сообщения из очереди команд.
-// Обрабатывает CMD_FULL_TANK: fuel_base = tank_capacity.
+// CMD_FULL_TANK: fuel_base = tank_capacity
+// CMD_OTA_START: задача завершается (освобождение памяти)
 //
 static void processCommands(QueueHandle_t cmdQueue) {
     uint8_t cmd;
@@ -138,6 +139,12 @@ static void processCommands(QueueHandle_t cmdQueue) {
 #if DEBUG_LOG
             Serial.printf("[Simulator] Full tank: fuelBase = %.1f L\n", fuelBase);
 #endif
+        } else if (cmd == CMD_OTA_START) {
+#if DEBUG_LOG
+            Serial.println("[Simulator] OTA START — shutting down");
+#endif
+            isRunning = false;
+            vTaskDelete(NULL);
         }
     }
 }

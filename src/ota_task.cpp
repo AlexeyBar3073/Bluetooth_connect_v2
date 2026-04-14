@@ -3,18 +3,17 @@
 // OTA-обновление прошивки — специализированная задача.
 //
 // Жизненный цикл:
-//   otaTaskStart(firmwareSize)  → создаёт задачу, инициализирует Update
+//   otaTaskStart(firmwareSize)  → CMD_OTA_START → ждёт остановки задач → Update
 //   OTA Task подписывается на TOPIC_OTA_CHUNK_PACK (OtaChunkPack — бинарный пакет)
 //   Декодирует base64 → CRC16 verify → пишет во flash → публикует pack в TOPIC_OTA_RESULT
 //   Protocol Task принимает результат → формирует JSON ack → Android
 //   При ota_end (TOPIC_CMD) → Update.end() → ESP.restart()
 //
-// OTA Task получает типизированный OtaChunkPack (без JSON обёртки, без парсинга строк).
-// Protocol Task извлёк bin из JSON, сформировал OtaChunkPack, передал OTA.
+// Управление памятью:
+//   CMD_OTA_START публикуется в TOPIC_CMD — каждая задача сама завершается
+//   (isRunningFlag = false, vTaskDelete). DataRouter — только почтальон.
 //
-// ПАМЯТЬ: Перед Update.begin() останавливаются лишние задачи и освобождается куча.
-//
-// ВЕРСИЯ: 6.8.13 — OtaChunkPack: типизированный пакет + CRC16 verify
+// ВЕРСИЯ: 6.8.15 — OTA: CMD_OTA_START, задачи завершаются сами
 // -----------------------------------------------------------------------------
 
 #include "ota_task.h"
@@ -23,16 +22,6 @@
 #include "commands.h"
 #include "app_config.h"
 #include <Update.h>
-
-// =============================================================================
-// extern — остановка задач на время OTA
-// =============================================================================
-
-extern void simulatorStop();
-extern void calculatorStop();
-extern void klineStop();
-extern void climateStop();
-extern void oledStop();
 
 // =============================================================================
 // CRC16 — полином 0xA001 (CRC-16-IBM), стандарт для embedded
@@ -322,37 +311,27 @@ void otaTaskStart(size_t firmwareSize, int ackId) {
     // =========================================================================
     // Освобождение памяти перед Update.begin()
     // Update.begin(firmwareSize) требует contiguous блок ~1.18 МБ.
-    // Останавливаем задачи, которые НЕ нужны во время OTA:
+    // Публикуем CMD_OTA_START — каждая задача сама завершается:
     //   - Simulator/RealEngine (физика автомобиля)
     //   - Calculator (расчёт TripPack)
     //   - K-Line (диагностика)
     //   - Climate (климат)
     //   - OLED (дисплей)
+    //   - Storage (NVS)
+    // DataRouter — только почтальон, не диспетчер.
     // =========================================================================
 
-    Serial.println("[OTA] Freeing memory before Update.begin()...");
-    logHeapState("before_stop");
+    Serial.println("[OTA] Sending CMD_OTA_START to all tasks...");
+    logHeapState("before");
 
-#if REAL_ENGINE_ENABLED
-    extern void realEngineStop();
-    realEngineStop();
-#else
-    simulatorStop();
-#endif
-    calculatorStop();
-    klineStop();
-    climateStop();
-#if OLED_ENABLED
-    oledStop();
-#endif
+    DataRouter& dr = DataRouter::getInstance();
+    dr.publish(TOPIC_CMD, CMD_OTA_START);
 
-    // Небольшая задержка чтобы задачи освободили ресурсы
-    delay(100);
-    logHeapState("after_stop");
+    // Задержка чтобы задачи успели завершиться (heartbeat < 3000 мс у всех)
+    delay(500);
+    logHeapState("after_tasks_shutdown");
 
     // Очистка очередей телеметрии от накопленных данных
-    // Protocol Task может иметь накопленные пакеты в очередях подписок
-    DataRouter& dr = DataRouter::getInstance();
     dr.drainTopic(TOPIC_ENGINE_PACK);
     dr.drainTopic(TOPIC_TRIP_PACK);
     dr.drainTopic(TOPIC_KLINE_PACK);

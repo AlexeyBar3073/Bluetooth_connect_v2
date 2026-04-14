@@ -349,6 +349,14 @@ static void processCommands() {
             Serial.println("[RealEngine] Then send calibrate_deadtime_end with fuel_ml_per_min");
 #endif
         }
+        // --- OTA START: Завершение задачи (освобождение памяти) ---
+        else if ((Command)cmd == CMD_OTA_START) {
+#if DEBUG_LOG
+            Serial.println("[RealEngine] OTA START — shutting down");
+#endif
+            isRunningFlag = false;
+            vTaskDelete(NULL);
+        }
     }
 }
 

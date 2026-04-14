@@ -204,6 +204,14 @@ static void processCommands(QueueHandle_t q) {
                 current_fuel_used = 0.0f;
                 break;
 
+            case CMD_OTA_START:
+#if DEBUG_LOG
+                Serial.println("[Calculator] OTA START — shutting down");
+#endif
+                isRunningFlag = false;
+                vTaskDelete(NULL);
+                break;
+
             default:
                 break;
         }

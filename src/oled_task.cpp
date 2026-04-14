@@ -9,6 +9,7 @@
 #include "data_router.h"
 #include "topics.h"
 #include "packets.h"
+#include "commands.h"
 #include "icons.h"
 #include "app_config.h"
 #include <U8g2lib.h>
@@ -118,6 +119,10 @@ void oledTask(void* parameter) {
     dr.subscribe(TOPIC_TRIP_PACK,      tripQ,   QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_TRANSPORT_STATUS, btQ,   QueuePolicy::OVERWRITE, true);  // retain
 
+    // Подписка на команды (только для CMD_OTA_START)
+    QueueHandle_t cmdQ = xQueueCreate(1, sizeof(uint8_t));
+    dr.subscribe(TOPIC_CMD, cmdQ, QueuePolicy::FIFO_DROP);
+
     // Начальный BT статус из кэша
     bool btState;
     if (dr.getCached(TOPIC_TRANSPORT_STATUS, btState)) {
@@ -132,6 +137,17 @@ void oledTask(void* parameter) {
 
     while (1) {
         lastHeartbeat = millis();
+
+        // Проверка CMD_OTA_START
+        if (cmdQ) {
+            uint8_t cmd;
+            while (xQueueReceive(cmdQ, &cmd, 0) == pdTRUE) {
+                if (cmd == CMD_OTA_START) {
+                    isRunning = false;
+                    vTaskDelete(NULL);
+                }
+            }
+        }
 
         // Чтение EnginePack
         EnginePack pEng;

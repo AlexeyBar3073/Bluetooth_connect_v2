@@ -14,6 +14,7 @@
 #include "data_router.h"
 #include "topics.h"
 #include "packets.h"
+#include "commands.h"
 #include <Preferences.h>
 #include <math.h>
 
@@ -150,6 +151,10 @@ void storageTask(void* parameter) {
     dr.subscribe(TOPIC_TRIP_PACK,     tripQ,     QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE);
 
+    // Подписка на команды (только для CMD_OTA_START)
+    QueueHandle_t cmdQ = xQueueCreate(1, sizeof(uint8_t));
+    dr.subscribe(TOPIC_CMD, cmdQ, QueuePolicy::FIFO_DROP);
+
 #if DEBUG_LOG
     Serial.println("[Storage] Task running (DataRouter, Binary NVS)");
 #endif
@@ -157,6 +162,20 @@ void storageTask(void* parameter) {
     while (1) {
         lastHeartbeat = millis();
         unsigned long now = millis();
+
+        // Проверка CMD_OTA_START
+        if (cmdQ) {
+            uint8_t cmd;
+            while (xQueueReceive(cmdQ, &cmd, 0) == pdTRUE) {
+                if (cmd == CMD_OTA_START) {
+#if DEBUG_LOG
+                    Serial.println("[Storage] OTA START — shutting down");
+#endif
+                    isRunningFlag = false;
+                    vTaskDelete(NULL);
+                }
+            }
+        }
 
         // Сохранение TripPack при изменении (throttle 60 сек)
         TripPack p;

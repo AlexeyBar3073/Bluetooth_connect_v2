@@ -90,7 +90,8 @@ enum Command : uint8_t {
     CMD_CALIBRATE_INJECTOR  = 0x0E,  // Калибровка форсунки (реальный расход → injector_flow)
     CMD_CALIBRATE_DEADTIME  = 0x0F,  // Калибровка dead time (расход на холостых → dead_time_us)
 
-    // --- OTA завершение (обрабатывает OTA Task) ---
+    // --- OTA (обрабатывают все задачи) ---
+    CMD_OTA_START           = 0x11,  // Начало OTA: все задачи завершаются (освобождение памяти)
     CMD_OTA_END             = 0x10,  // Завершение OTA: Update.end() → ESP.restart()
 };
 

@@ -105,6 +105,14 @@ static void processCommands() {
 #endif
                 break;
 
+            case CMD_OTA_START:
+#if DEBUG_LOG
+                Serial.println("[KLine] OTA START — shutting down");
+#endif
+                isRunningFlag = false;
+                vTaskDelete(NULL);
+                break;
+
             default:
                 break;
         }
