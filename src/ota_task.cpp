@@ -219,6 +219,7 @@ void otaTask(void* parameter) {
         if (cmdQ) {
             uint8_t cmd;
             while (xQueueReceive(cmdQ, &cmd, 0) == pdTRUE) {
+                Serial.println("[OTA] есть новая команда в cmdQ");
                 if ((Command)cmd == CMD_OTA_END) {
                     // Android сказал "всё, завершай" — вызываем Update.end()
                     // независимо от таймаута. Если что-то не так — Update.end() сам вернёт ошибку.
@@ -343,12 +344,27 @@ void otaBeginUpdate(size_t firmwareSize) {
 
     logHeapState("before");
 
-    if (!Update.begin(firmwareSize)) {
-        Serial.println("[OTA] Update.begin() FAILED!");
-        Update.printError(Serial);
-        logHeapState("update_begin_failed");
-        return;
-    }
+    // 1. Проверяем, сколько места в системном разделе для обновления
+size_t maxFreeAppSpace = ESP.getFreeSketchSpace();
+
+Serial.println("--- OTA Debug Info ---");
+Serial.printf("[OTA] Required size (from server): %u bytes\n", firmwareSize);
+Serial.printf("[OTA] Max available partition space: %u bytes\n", maxFreeAppSpace);
+Serial.printf("[OTA] Current Free Heap: %u bytes\n", ESP.getFreeHeap());
+Serial.printf("[OTA] Largest Free Block: %u bytes\n", ESP.getMaxAllocHeap());
+Serial.println("-----------------------");
+
+if (firmwareSize > maxFreeAppSpace) {
+    Serial.printf("[OTA] ERROR: Firmware is too large! Need %u, have %u\n", firmwareSize, maxFreeAppSpace);
+    return;
+}
+
+if (!Update.begin(firmwareSize)) {
+    Serial.println("[OTA] Update.begin() FAILED!");
+    Update.printError(Serial);
+    logHeapState("update_begin_failed");
+    return;
+}
 
     otaActive = true;
     logHeapState("update_begin_ok");

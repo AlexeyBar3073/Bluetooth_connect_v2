@@ -343,6 +343,7 @@ static void processIncoming(QueueHandle_t q) {
         // --- ota_end — завершение OTA → команда в OTA Task ---
         if (strcmp(cmd, "ota_end") == 0) {
             DBG_PRINTLN("[Proto] ota_end received, sending CMD_OTA_END");
+            Serial.println("[Proto] ota_end received, sending CMD_OTA_END");
 
             // Сразу отвечаем Android — он открывает диалог ожидания перезагрузки
             JsonDocument resp;
