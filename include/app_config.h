@@ -104,6 +104,8 @@
 
 #define TASK_STACK_SIZE       3072   // Стандарт (Sim, Calc, Storage, OLED, RealEngine)
 #define TASK_STACK_PROTOCOL   6144   // Protocol (ArduinoJson + OTA обработка)
-#define TASK_STACK_CLIMATE    2048   // Минимальный
+#define TASK_STACK_CLIMATE    1536   // Минимальный
+#define TASK_STACK_OTA        4096   // OTA Task (Update.h + OtaChunkPack)
+#define TASK_STACK_BT         4096   // BT_Transport (static txBuffer/temp)
 
 #endif // APP_CONFIG_H

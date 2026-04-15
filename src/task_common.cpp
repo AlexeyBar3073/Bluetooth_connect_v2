@@ -6,6 +6,7 @@
 // -----------------------------------------------------------------------------
 
 #include "task_common.h"
+#include "debug.h"
 
 // =============================================================================
 // taskInit — инициализация общего контекста
@@ -22,7 +23,7 @@ bool taskInit(TaskContext* ctx, const char* name, bool* isRunningFlag, unsigned 
     // Очередь команд
     ctx->cmdQ = xQueueCreate(5, sizeof(uint8_t));
     if (!ctx->cmdQ) {
-        Serial.printf("[%s] ERROR: Failed to create cmd queue!\n", name);
+        DBG_PRINTF("[%s] ERROR: Failed to create cmd queue!\n", name);
         return false;
     }
 
@@ -45,7 +46,7 @@ void taskProcessCommands(TaskContext* ctx, TaskCmdCallback specificHandler) {
 
         // --- CMD_OTA_START: общий обработчик для ВСЕХ задач ---
         if (c == CMD_OTA_START) {
-            Serial.printf("[%s] CMD_OTA_START — shutting down\n", ctx->name);
+            DBG_PRINTF("[%s] CMD_OTA_START — shutting down\n", ctx->name);
             taskShutdown(ctx);
             // vTaskDelete не возвращается — остальной код не выполнится
             return;

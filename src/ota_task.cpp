@@ -238,13 +238,14 @@ void otaTask(void* parameter) {
             }
         }
 
-        // Чанки данных (только когда OTA активна)
+                // Чанки данных (только когда OTA активна)
         if (otaActive && chunkPackQ) {
-            OtaChunkPack otaPack;
+            static OtaChunkPack otaPack; // static чтобы не нагружать стек задачи
             while (xQueueReceive(chunkPackQ, &otaPack, 0) == pdTRUE) {
                 processChunkPack(&otaPack);
             }
         }
+
 
         // Таймаут
         if (otaActive && (millis() - lastChunkTime > OTA_TIMEOUT_MS)) {
@@ -267,10 +268,11 @@ void otaTaskStart() {
         lastHeartbeat = millis();
         isRunningFlag = true;
         // Ядро 1 — OTA (тот же приоритет что и Protocol)
-        xTaskCreatePinnedToCore(otaTask, "OTA", 8192, NULL, 3, &otaTaskHandle, 1);
-        Serial.println("[OTA] Started (8192 stack, P3, Core 1)");
+        xTaskCreatePinnedToCore(otaTask, "OTA", TASK_STACK_OTA, NULL, 3, &otaTaskHandle, 1);
+        Serial.println("[OTA] Started (TASK_STACK_OTA, P3, Core 1)");
     }
 }
+
 
 // =============================================================================
 // otaTaskStop — остановка задачи
@@ -308,12 +310,13 @@ void otaBeginUpdate(size_t firmwareSize) {
 
     // Запускаем OTA Task лениво — только когда действительно нужна OTA
     // Это экономит ~8 KB RAM на старте (стековый буфер задачи)
-    if (!otaTaskHandle) {
+        if (!otaTaskHandle) {
         lastHeartbeat = millis();
         isRunningFlag = true;
         chunkPackQ = NULL;
-        xTaskCreatePinnedToCore(otaTask, "OTA", 3072, NULL, 3, &otaTaskHandle, 1);
+        xTaskCreatePinnedToCore(otaTask, "OTA", TASK_STACK_OTA, NULL, 3, &otaTaskHandle, 1);
         // Даём задаче время инициализироваться
+
         vTaskDelay(50 / portTICK_PERIOD_MS);
     }
 

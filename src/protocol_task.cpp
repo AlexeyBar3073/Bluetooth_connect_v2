@@ -21,6 +21,7 @@
 #include "bt_transport.h"
 #include "ota_task.h"
 #include "app_config.h"
+#include "debug.h"
 #include <ArduinoJson.h>
 
 // =============================================================================
@@ -208,7 +209,7 @@ static void processIncoming(QueueHandle_t q) {
         JsonDocument doc;
         DeserializationError err = deserializeJson(doc, rxIncomingBuffer);
         if (err) {
-            Serial.printf("[Proto] JSON parse error: %s (free heap: %d)\n",
+            DBG_PRINTF("[Proto] JSON parse error: %s (free heap: %d)\n",
                           err.c_str(), (int)ESP.getFreeHeap());
             JsonDocument resp;
             resp["error"] = "Invalid JSON";
@@ -271,7 +272,7 @@ static void processIncoming(QueueHandle_t q) {
         // --- ota_update — начать OTA обновление ---
         if (strcmp(cmd, "ota_update") == 0) {
             int fwSize = doc["size"];
-            Serial.printf("[Proto] ota_update: size=%d, ack_id=%d\n", fwSize, lastMsgId);
+            DBG_PRINTF("[Proto] ota_update: size=%d, ack_id=%d\n", fwSize, lastMsgId);
             if (fwSize > 0) {
                 // Останавливаем телеметрию
                 isStreamingActive = false;
@@ -292,10 +293,10 @@ static void processIncoming(QueueHandle_t q) {
                 doc["ota_init"].to<JsonObject>()["size"]  = ota.chunkSize;
                 doc["ota_init"].to<JsonObject>()["count"] = ota.totalChunks;
                 publishOutgoing(doc);
-                Serial.printf("[Proto] ota_init sent: chunkSize=%d, count=%d, ack_id=%d\n",
+                DBG_PRINTF("[Proto] ota_init sent: chunkSize=%d, count=%d, ack_id=%d\n",
                               ota.chunkSize, ota.totalChunks, lastMsgId);
             } else {
-                Serial.println("[Proto] ota_update: INVALID SIZE");
+                DBG_PRINTLN("[Proto] ota_update: INVALID SIZE");
                 JsonDocument resp;
                 resp["error"] = "invalid_size";
                 publishOutgoing(resp);
@@ -315,8 +316,8 @@ static void processIncoming(QueueHandle_t q) {
             }
 
             if (b64 && pack > 0 && strlen(b64) <= OTA_CHUNK_B64_SIZE) {
-                // Формируем типизированный пакет
-                OtaChunkPack otaPack;
+                // Формируем типизированный пакет — static чтобы не占用 1375 байт стека
+                static OtaChunkPack otaPack;
                 otaPack.pack = static_cast<uint16_t>(pack);
                 otaPack.crc16 = crc;
                 otaPack.b64_len = static_cast<uint16_t>(strlen(b64));
@@ -329,7 +330,7 @@ static void processIncoming(QueueHandle_t q) {
                     &otaPack,
                     sizeof(OtaChunkPack)
                 );
-                Serial.printf("[Proto] publishPacket pack=%d, dispatched=%d\n", pack, sent ? 1 : 0);
+                DBG_PRINTF("[Proto] publishPacket pack=%d, dispatched=%d\n", pack, sent ? 1 : 0);
             }
 
             // ack_id — БЕЗУСЛОВНЫЙ ответ, не ждём OTA
@@ -341,7 +342,7 @@ static void processIncoming(QueueHandle_t q) {
 
         // --- ota_end — завершение OTA → команда в OTA Task ---
         if (strcmp(cmd, "ota_end") == 0) {
-            Serial.println("[Proto] ota_end received, sending CMD_OTA_END");
+            DBG_PRINTLN("[Proto] ota_end received, sending CMD_OTA_END");
 
             // Сразу отвечаем Android — он открывает диалог ожидания перезагрузки
             JsonDocument resp;
@@ -507,9 +508,7 @@ void protocolTask(void* parameter) {
     QueueHandle_t otaResultQ = xQueueCreate(3, sizeof(int));
     dr.subscribe(TOPIC_OTA_RESULT, otaResultQ, QueuePolicy::FIFO_DROP);
 
-#if DEBUG_LOG
-    Serial.println("[Protocol] Task started (DataRouter, Fractional: FAST 100ms, TRIP 500ms, SERVICE 1000ms)");
-#endif
+    DBG_PRINTLN("[Protocol] Task started (DataRouter, Fractional: FAST 100ms, TRIP 500ms, SERVICE 1000ms)");
 
     unsigned long lastSend = 0;
     int counter = 0;
@@ -541,7 +540,7 @@ void protocolTask(void* parameter) {
                     JsonObject replay = doc["ota_replay"].to<JsonObject>();
                     replay["pack"] = -otaPack;
                     publishOutgoing(doc);
-                    Serial.printf("[Proto] OTA replay requested for pack %d\n", -otaPack);
+                    DBG_PRINTF("[Proto] OTA replay requested for pack %d\n", -otaPack);
                 }
             }
         }

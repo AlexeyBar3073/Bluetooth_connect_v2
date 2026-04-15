@@ -24,6 +24,7 @@
 // -----------------------------------------------------------------------------
 
 #include "data_router.h"
+#include "debug.h"
 
 // =============================================================================
 // Singleton
@@ -41,9 +42,7 @@ DataRouter& DataRouter::getInstance() {
 void DataRouter::begin() {
     _mutex = xSemaphoreCreateMutex();
     _resetInternal();
-#if DEBUG_LOG
-    Serial.println("[DataRouter] Initialized (Typed topics, module-owned queues)");
-#endif
+    DBG_PRINTLN("[DataRouter] Initialized (Typed topics, module-owned queues)");
 }
 
 // =============================================================================
@@ -54,9 +53,7 @@ void DataRouter::reset() {
     xSemaphoreTake(_mutex, portMAX_DELAY);
     _resetInternal();
     xSemaphoreGive(_mutex);
-#if DEBUG_LOG
-    Serial.println("[DataRouter] RESET: All subscribers cleared");
-#endif
+    DBG_PRINTLN("[DataRouter] RESET: All subscribers cleared");
 }
 
 // =============================================================================
@@ -105,7 +102,7 @@ void DataRouter::_resetInternal() {
 
 bool DataRouter::subscribe(Topic topic, QueueHandle_t queue, QueuePolicy policy, bool retain) {
     if (!queue) {
-        Serial.println("[DataRouter] ERROR: NULL queue!");
+        DBG_PRINTLN("[DataRouter] ERROR: NULL queue!");
         return false;
     }
 
@@ -113,7 +110,7 @@ bool DataRouter::subscribe(Topic topic, QueueHandle_t queue, QueuePolicy policy,
 
     TopicRouter& tr = _topicRouters[topic];
     if (tr.subCount >= ROUTER_MAX_SUBS_PER_TOPIC) {
-        Serial.printf("[DataRouter] ERROR: Max subscribers for topic %d!\n", topic);
+        DBG_PRINTF("[DataRouter] ERROR: Max subscribers for topic %d!\n", topic);
         xSemaphoreGive(_mutex);
         return false;
     }
@@ -139,11 +136,9 @@ bool DataRouter::subscribe(Topic topic, QueueHandle_t queue, QueuePolicy policy,
 
     xSemaphoreGive(_mutex);
 
-#if DEBUG_LOG
-    Serial.printf("[DataRouter] Subscribed: topic=%d, queue=%p, policy=%s, depth=%d, subs=%d, retain=%d\n",
-                  topic, queue, policy == QueuePolicy::OVERWRITE ? "OVERWRITE" : "FIFO_DROP",
-                  depth, tr.subCount, retain ? 1 : 0);
-#endif
+    DBG_PRINTF("[DataRouter] Subscribed: topic=%d, queue=%p, policy=%s, depth=%d, subs=%d, retain=%d\n",
+               topic, queue, policy == QueuePolicy::OVERWRITE ? "OVERWRITE" : "FIFO_DROP",
+               depth, tr.subCount, retain ? 1 : 0);
 
     return true;
 }
@@ -346,8 +341,7 @@ uint32_t DataRouter::getDropCount(Topic topic) {
 // =============================================================================
 
 void DataRouter::printStats() {
-#if DEBUG_LOG
-    Serial.println("=== DataRouter Stats ===");
+    DBG_PRINTLN("=== DataRouter Stats ===");
     for (int t = 0; t < TOPIC_COUNT; t++) {
         TopicRouter& tr = _topicRouters[t];
         if (tr.valid) {
@@ -355,9 +349,8 @@ void DataRouter::printStats() {
             for (int i = 0; i < tr.subCount; i++) {
                 drops += tr.subs[i].dropCount;
             }
-            Serial.printf("Topic %d: %d subs, %lu drops\n", t, tr.subCount, drops);
+            DBG_PRINTF("Topic %d: %d subs, %lu drops\n", t, tr.subCount, drops);
         }
     }
-    Serial.println("========================");
-#endif
+    DBG_PRINTLN("========================");
 }

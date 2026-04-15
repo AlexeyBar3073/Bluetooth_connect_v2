@@ -35,6 +35,7 @@
 #include "commands.h"
 #include "app_config.h"
 #include "ina226.h"
+#include "debug.h"
 
 // ESP-IDF драйверы (доступны в Arduino-среде через esp32-hal)
 extern "C" {
@@ -198,7 +199,7 @@ static void initRMT() {
     ESP_ERROR_CHECK(rmt_driver_install(rmtRx.channel, 1024, 0));  // Буфер 1024 байта
     rmt_rx_start(rmtRx.channel, true);
 
-    Serial.println("[RealEngine] RMT initialized (injector measurement)");
+    DBG_PRINTLN("[RealEngine] RMT initialized (injector measurement)");
 }
 
 // =============================================================================
@@ -225,7 +226,7 @@ static void initPCNT() {
     ESP_ERROR_CHECK(pcnt_counter_clear(PCNT_UNIT_0));
     ESP_ERROR_CHECK(pcnt_counter_resume(PCNT_UNIT_0));
 
-    Serial.println("[RealEngine] PCNT initialized (shaft speed counter)");
+    DBG_PRINTLN("[RealEngine] PCNT initialized (shaft speed counter)");
 }
 
 // =============================================================================
@@ -309,20 +310,16 @@ static void processCommands() {
         if ((Command)cmd == CMD_FULL_TANK) {
             fuelBase = tankCapacity;
             fuelLevel = tankCapacity;
-#if DEBUG_LOG
-            Serial.printf("[RealEngine] Full tank: %.1f L\n", fuelLevel);
-#endif
+            DBG_PRINTF("[RealEngine] Full tank: %.1f L\n", fuelLevel);
         }
         // --- CALIBRATE_SPEED: Старт калибровки VSS ---
         else if ((Command)cmd == CMD_CALIBRATE_SPEED) {
             pcnt_counter_clear(PCNT_UNIT_0);
             calSpeedPulses = 0;
             calSpeedActive = true;
-#if DEBUG_LOG
-            Serial.println("[RealEngine] === CALIBRATION VSS START ===");
-            Serial.println("[RealEngine] Drive known distance (e.g. 1 km)");
-            Serial.println("[RealEngine] Then send calibrate_speed_end with distance_m");
-#endif
+            DBG_PRINTLN("[RealEngine] === CALIBRATION VSS START ===");
+            DBG_PRINTLN("[RealEngine] Drive known distance (e.g. 1 km)");
+            DBG_PRINTLN("[RealEngine] Then send calibrate_speed_end with distance_m");
         }
         // --- CALIBRATE_INJECTOR: Старт калибровки форсунки ---
         else if ((Command)cmd == CMD_CALIBRATE_INJECTOR) {
@@ -331,27 +328,23 @@ static void processCommands() {
             calInjectorActive = true;
             // Сбрасываем расход для точного замера
             fuelUsedAccum = 0;
-#if DEBUG_LOG
-            Serial.println("[RealEngine] === CALIBRATION INJECTOR START ===");
-            Serial.println("[RealEngine] Fill tank FULL, drive normally");
-            Serial.println("[RealEngine] Then send calibrate_injector_end with fuel_liters");
-#endif
+            DBG_PRINTLN("[RealEngine] === CALIBRATION INJECTOR START ===");
+            DBG_PRINTLN("[RealEngine] Fill tank FULL, drive normally");
+            DBG_PRINTLN("[RealEngine] Then send calibrate_injector_end with fuel_liters");
         }
         // --- CALIBRATE_DEADTIME: Старт калибровки dead time ---
         else if ((Command)cmd == CMD_CALIBRATE_DEADTIME) {
             calDeadTimeTotalUs = 0;
             calDeadTimeFuelUsed = 0;
             calDeadTimeActive = true;
-#if DEBUG_LOG
-            Serial.println("[RealEngine] === CALIBRATION DEAD TIME START ===");
-            Serial.println("[RealEngine] Idle engine for 5-10 minutes (warm)");
-            Serial.println("[RealEngine] Measure real fuel consumption (ml/min)");
-            Serial.println("[RealEngine] Then send calibrate_deadtime_end with fuel_ml_per_min");
-#endif
+            DBG_PRINTLN("[RealEngine] === CALIBRATION DEAD TIME START ===");
+            DBG_PRINTLN("[RealEngine] Idle engine for 5-10 minutes (warm)");
+            DBG_PRINTLN("[RealEngine] Measure real fuel consumption (ml/min)");
+            DBG_PRINTLN("[RealEngine] Then send calibrate_deadtime_end with fuel_ml_per_min");
         }
         // --- OTA START: Завершение задачи (освобождение памяти) ---
         else if ((Command)cmd == CMD_OTA_START) {
-            Serial.println("[RealEngine] CMD_OTA_START — shutting down");
+            DBG_PRINTLN("[RealEngine] CMD_OTA_START — shutting down");
             isRunningFlag = false;
             vTaskDelete(NULL);
         }
@@ -414,12 +407,10 @@ static void processCalibrate() {
             sp.kline_protocol    = 0;
             DataRouter::getInstance().publishPacket(TOPIC_SETTINGS_PACK, &sp, sizeof(sp));
 
-#if DEBUG_LOG
-            Serial.printf("[RealEngine] === CALIBRATION VSS END ===\n");
-            Serial.printf("[RealEngine] %u pulses / %d m = %.3f pulses/m (%.0f pulses/km)\n",
+            DBG_PRINTF("[RealEngine] === CALIBRATION VSS END ===\n");
+            DBG_PRINTF("[RealEngine] %u pulses / %d m = %.3f pulses/m (%.0f pulses/km)\n",
                           calSpeedPulses, value, pulsesPerMeter, pulsesPerMeter * 1000.0f);
-            Serial.printf("[RealEngine] Saved to NVS!\n");
-#endif
+            DBG_PRINTF("[RealEngine] Saved to NVS!\n");
             calSpeedActive = false;
             calSpeedPulses = 0;
             pcnt_counter_clear(PCNT_UNIT_0);
@@ -450,13 +441,11 @@ static void processCalibrate() {
                 sp.kline_protocol    = 0;
                 DataRouter::getInstance().publishPacket(TOPIC_SETTINGS_PACK, &sp, sizeof(sp));
 
-#if DEBUG_LOG
-                Serial.printf("[RealEngine] === CALIBRATION INJECTOR END ===\n");
-                Serial.printf("[RealEngine] Real fuel: %.2f L, Total time: %.1f sec, Pulses: %u\n",
+                DBG_PRINTF("[RealEngine] === CALIBRATION INJECTOR END ===\n");
+                DBG_PRINTF("[RealEngine] Real fuel: %.2f L, Total time: %.1f sec, Pulses: %u\n",
                               realFuelLiters, totalSec, calInjectorPulses);
-                Serial.printf("[RealEngine] injector_flow = %.1f ml/min\n", injectorFlow);
-                Serial.printf("[RealEngine] Saved to NVS!\n");
-#endif
+                DBG_PRINTF("[RealEngine] injector_flow = %.1f ml/min\n", injectorFlow);
+                DBG_PRINTF("[RealEngine] Saved to NVS!\n");
                 calInjectorActive = false;
                 calInjectorTotalUs = 0;
                 calInjectorPulses = 0;
@@ -491,15 +480,13 @@ static void processCalibrate() {
                 // Ограничиваем разумным диапазоном
                 newDeadTime = constrain(newDeadTime, 400.0f, 1200.0f);
 
-#if DEBUG_LOG
-                Serial.printf("[RealEngine] === CALIBRATION DEAD TIME END ===\n");
-                Serial.printf("[RealEngine] Real consumption: %.1f ml/min\n", realFuelMlPerMin);
-                Serial.printf("[RealEngine] Pulses: %u, Corrected total: %llu us\n",
+                DBG_PRINTF("[RealEngine] === CALIBRATION DEAD TIME END ===\n");
+                DBG_PRINTF("[RealEngine] Real consumption: %.1f ml/min\n", realFuelMlPerMin);
+                DBG_PRINTF("[RealEngine] Pulses: %u, Corrected total: %llu us\n",
                               calInjectorPulses, calDeadTimeTotalUs);
-                Serial.printf("[RealEngine] Suggested DEAD_TIME_US: %.0f (was %d)\n",
+                DBG_PRINTF("[RealEngine] Suggested DEAD_TIME_US: %.0f (was %d)\n",
                               newDeadTime, DEAD_TIME_US);
-                Serial.printf("[RealEngine] ⚠️  Update DEAD_TIME_US in code and reflash!\n");
-#endif
+                DBG_PRINTF("[RealEngine] ⚠️  Update DEAD_TIME_US in code and reflash!\n");
                 calDeadTimeActive = false;
                 calDeadTimeTotalUs = 0;
             }
@@ -566,19 +553,19 @@ static void realEngineTask(void* parameter) {
     // Инициализация INA226
     inaReady = ina226.begin(Wire, 0.1f);
     if (inaReady) {
-        Serial.println("[RealEngine] INA226 initialized");
+        DBG_PRINTLN("[RealEngine] INA226 initialized");
     } else {
-        Serial.println("[RealEngine] INA226 NOT found, using defaults");
+        DBG_PRINTLN("[RealEngine] INA226 NOT found, using defaults");
     }
 
     // Инициализация ADC для датчика уровня топлива
     analogReadResolution(12);  // 12 бит (0-4095)
     analogSetWidth(12);        // Разрешение 12 бит
     pinMode(FUEL_LEVEL_PIN, INPUT);
-    Serial.printf("[RealEngine] Fuel level ADC initialized (GPIO%d, 12-bit)\n",
+    DBG_PRINTF("[RealEngine] Fuel level ADC initialized (GPIO%d, 12-bit)\n",
                   FUEL_LEVEL_PIN);
 
-    Serial.printf("[RealEngine] Started (RMT=GPIO%d, PCNT=GPIO%d, ADC=GPIO%d)\n",
+    DBG_PRINTF("[RealEngine] Started (RMT=GPIO%d, PCNT=GPIO%d, ADC=GPIO%d)\n",
                   INJECTOR_PIN, SHAFT_PIN, FUEL_LEVEL_PIN);
 
     unsigned long lastPublish = 0;

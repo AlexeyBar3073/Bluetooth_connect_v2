@@ -23,6 +23,8 @@
 #include "bt_transport.h"
 #include "data_router.h"
 #include "topics.h"
+#include "app_config.h"
+#include "debug.h"
 #include <BluetoothSerial.h>
 
 static BluetoothSerial SerialBT;
@@ -107,16 +109,14 @@ void btTransportTask(void* parameter) {
     txQueue = xQueueCreate(1, 2048);  // Увеличено до 2048 для пиковых нагрузок OTA
     dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::OVERWRITE);
 
-    // Временный буфер для чтения из BT
-    uint8_t temp[512];
+    // Временный буфер для чтения из BT — static, чтобы не占用 стек задачи
+    static uint8_t temp[512];
 
     // Буфер для сборки строки — 2048 достаточно для OTA-чанка JSON (~1450 байт)
     static char lineBuffer[2048];
     static size_t linePos = 0;
 
-#if DEBUG_LOG
-    Serial.println("[BT Transport] Task running (watermark, adaptive parse)");
-#endif
+    DBG_PRINTLN("[BT Transport] Task running (watermark, adaptive parse)");
 
     while (1) {
         lastHeartbeat = millis();
@@ -139,10 +139,8 @@ void btTransportTask(void* parameter) {
                 for (size_t i = 0; i < actuallyRead; i++) {
                     if (!rbPush(temp[i])) {
                         rxBackpressure = true;
-#if DEBUG_LOG
-                        Serial.printf("[BT] Buffer full (%d/%d), backpressure ON\n",
-                                     (int)rbUsed(), RX_RING_SIZE);
-#endif
+                        DBG_PRINTF("[BT] Buffer full (%d/%d), backpressure ON\n",
+                                  (int)rbUsed(), RX_RING_SIZE);
                         break;
                     }
                 }
@@ -177,9 +175,7 @@ void btTransportTask(void* parameter) {
                     lineBuffer[linePos++] = (char)c;
                 } else {
                     linePos = 0;
-#if DEBUG_LOG
-                    Serial.println("[BT RX] Line buffer overflow");
-#endif
+                    DBG_PRINTLN("[BT RX] Line buffer overflow");
                 }
             }
         }
@@ -187,14 +183,12 @@ void btTransportTask(void* parameter) {
         // --- Backpressure: возобновление при draining ---
         if (rxBackpressure && rbUsed() < RX_WATERMARK_LOW) {
             rxBackpressure = false;
-#if DEBUG_LOG
-            Serial.println("[BT] Buffer drained, backpressure OFF");
-#endif
+            DBG_PRINTLN("[BT] Buffer drained, backpressure OFF");
         }
 
         // --- 4. TX: TOPIC_MSG_OUTGOING → Android (без ожидания) ---
         if (isConnected && txQueue) {
-            char txBuffer[2048];
+            static char txBuffer[2048];  // static — не占用 стек цикла
             if (xQueueReceive(txQueue, txBuffer, 0) == pdTRUE) {
                 size_t len = strlen(txBuffer) + 1;  // +1 за '\n'
                 // Отправляем только если в SPP-буфере есть место под всё сообщение.
@@ -222,39 +216,33 @@ void btTransportStart(const char* deviceName) {
 
     // Проверка кучи перед BT-init — Bluedroid требует ≥30 КБ
     if (ESP.getFreeHeap() < 30000) {
-        Serial.printf("[BT] Low heap (%u < 30000). Waiting for stabilization...\n", ESP.getFreeHeap());
+        DBG_PRINTF("[BT] Low heap (%u < 30000). Waiting for stabilization...\n", ESP.getFreeHeap());
         delay(2000);
         if (ESP.getFreeHeap() < 28000) {
-            Serial.printf("[BT] Init ABORTED (heap still too low: %u)\n", ESP.getFreeHeap());
+            DBG_PRINTF("[BT] Init ABORTED (heap still too low: %u)\n", ESP.getFreeHeap());
             return;
         }
     }
 
     // Увеличенная задержка — обход бага ESP-IDF HCI HAL crash
-#if DEBUG_LOG
-    Serial.printf("[BT Transport] Initializing '%s'...\n", deviceName);
-#endif
+    DBG_PRINTF("[BT Transport] Initializing '%s'...\n", deviceName);
     delay(800);
 
-#if DEBUG_LOG
-    Serial.printf("[BT Transport] Free heap: %u, max_alloc: %u\n",
-                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
-#endif
+    DBG_PRINTF("[BT Transport] Free heap: %u, max_alloc: %u\n",
+              (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
 
     if (!SerialBT.begin(deviceName)) {
-        Serial.println("[BT Transport] Init FAILED!");
+        DBG_PRINTLN("[BT Transport] Init FAILED!");
         return;
     }
     SerialBT.setTimeout(1);  // 1ms — readBytes не блокируется дольше
-#if DEBUG_LOG
-    Serial.printf("[BT Transport] Started: '%s'\n", deviceName);
-#endif
+    DBG_PRINTF("[BT Transport] Started: '%s'\n", deviceName);
 
     wasConnected = SerialBT.hasClient();
     DataRouter::getInstance().publish(TOPIC_TRANSPORT_STATUS, wasConnected);
 
     // Ядро 1, приоритет 2
-    xTaskCreatePinnedToCore(btTransportTask, "BT_Transport", 8192, NULL, 2, &btTaskHandle, 1);
+    xTaskCreatePinnedToCore(btTransportTask, "BT_Transport", TASK_STACK_BT, NULL, 2, &btTaskHandle, 1);
 }
 
 void btTransportStop() {
