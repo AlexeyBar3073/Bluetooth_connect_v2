@@ -20,7 +20,9 @@
 //   - Добавлять callback-и
 //   - Блокировать publish()
 //
-// ВЕРСИЯ: 6.0.0 — MAJOR: Типизированные топики, очереди у модулей
+// ВНИМАНИЕ: Логирование подписок ОТКЛЮЧЕНО для экономии памяти при старте!
+//
+// ВЕРСИЯ: Определяется в app_config.h (FW_VERSION_STR)
 // -----------------------------------------------------------------------------
 
 #include "data_router.h"
@@ -42,7 +44,7 @@ DataRouter& DataRouter::getInstance() {
 void DataRouter::begin() {
     _mutex = xSemaphoreCreateMutex();
     _resetInternal();
-    DBG_PRINTLN("[DataRouter] Initialized (Typed topics, module-owned queues)");
+    DBG_PRINTLN("[Router] Initialized");
 }
 
 // =============================================================================
@@ -53,7 +55,7 @@ void DataRouter::reset() {
     xSemaphoreTake(_mutex, portMAX_DELAY);
     _resetInternal();
     xSemaphoreGive(_mutex);
-    DBG_PRINTLN("[DataRouter] RESET: All subscribers cleared");
+    DBG_PRINTLN("[Router] RESET: All subscribers cleared");
 }
 
 // =============================================================================
@@ -97,12 +99,11 @@ void DataRouter::_resetInternal() {
 }
 
 // =============================================================================
-// subscribe
+// subscribe — БЕЗ ЛОГИРОВАНИЯ для экономии памяти
 // =============================================================================
 
 bool DataRouter::subscribe(Topic topic, QueueHandle_t queue, QueuePolicy policy, bool retain) {
     if (!queue) {
-        DBG_PRINTLN("[DataRouter] ERROR: NULL queue!");
         return false;
     }
 
@@ -110,9 +111,16 @@ bool DataRouter::subscribe(Topic topic, QueueHandle_t queue, QueuePolicy policy,
 
     TopicRouter& tr = _topicRouters[topic];
     if (tr.subCount >= ROUTER_MAX_SUBS_PER_TOPIC) {
-        DBG_PRINTF("[DataRouter] ERROR: Max subscribers for topic %d!\n", topic);
         xSemaphoreGive(_mutex);
         return false;
+    }
+
+    // Проверяем, не подписан ли уже этот queue (защита от дублирования)
+    for (int i = 0; i < tr.subCount; i++) {
+        if (tr.subs[i].queue == queue) {
+            xSemaphoreGive(_mutex);
+            return true;  // Уже подписан — не ошибка
+        }
     }
 
     uint8_t depth = (policy == QueuePolicy::OVERWRITE) ? 1 : ROUTER_MAX_QUEUE_DEPTH;
@@ -136,21 +144,27 @@ bool DataRouter::subscribe(Topic topic, QueueHandle_t queue, QueuePolicy policy,
 
     xSemaphoreGive(_mutex);
 
-    DBG_PRINTF("[DataRouter] Subscribed: topic=%d, queue=%p, policy=%s, depth=%d, subs=%d, retain=%d\n",
-               topic, queue, policy == QueuePolicy::OVERWRITE ? "OVERWRITE" : "FIFO_DROP",
-               depth, tr.subCount, retain ? 1 : 0);
-
+    // ЛОГ УДАЛЁН ДЛЯ ЭКОНОМИИ ПАМЯТИ
     return true;
 }
 
 // =============================================================================
-// unsubscribe
+// unsubscribe — БЕЗ ЛОГИРОВАНИЯ
 // =============================================================================
 
 void DataRouter::unsubscribe(Topic topic, QueueHandle_t queue) {
+    if (!queue) {
+        return;
+    }
+    
     xSemaphoreTake(_mutex, portMAX_DELAY);
 
     TopicRouter& tr = _topicRouters[topic];
+    if (!tr.valid) {
+        xSemaphoreGive(_mutex);
+        return;
+    }
+    
     for (int i = 0; i < tr.subCount; i++) {
         if (tr.subs[i].queue == queue) {
             // НЕ удаляем очередь — она принадлежит модулю
@@ -163,10 +177,11 @@ void DataRouter::unsubscribe(Topic topic, QueueHandle_t queue) {
     }
 
     xSemaphoreGive(_mutex);
+    // ЛОГ УДАЛЁН
 }
 
 // =============================================================================
-// _dispatch — рассылка данных подписчикам
+// _dispatch — рассылка данных подписчикам (логи ошибок оставлены)
 // =============================================================================
 
 bool DataRouter::_dispatch(Topic topic, const void* data, size_t len) {
@@ -178,15 +193,19 @@ bool DataRouter::_dispatch(Topic topic, const void* data, size_t len) {
     for (int i = 0; i < tr.subCount; i++) {
         SubscriberSlot& sub = tr.subs[i];
 
-        // SAFETY NET: пропуск удалённых/невалидных очередей
-        // Если задача удалила очередь, но не отписалась — sub.queue == NULL
-        if (!sub.queue) continue;
+        if (!sub.queue) {
+            continue;
+        }
 
         BaseType_t result;
 
         if (sub.policy == QueuePolicy::OVERWRITE) {
             result = xQueueOverwrite(sub.queue, data);
-            if (result == pdTRUE) any = true;
+            if (result != pdTRUE) {
+                sub.queue = NULL;  // Очередь невалидна
+            } else {
+                any = true;
+            }
         } else {
             result = xQueueSend(sub.queue, data, 0);
             if (result != pdTRUE) {
@@ -225,7 +244,6 @@ bool DataRouter::publish(Topic topic, int value) {
 // =============================================================================
 
 bool DataRouter::publish(Topic topic, bool value) {
-    // Обновляем кэш
     xSemaphoreTake(_mutex, portMAX_DELAY);
     _topicRouters[topic].boolValid = true;
     _topicRouters[topic].boolCache = value;
@@ -265,7 +283,10 @@ bool DataRouter::publish(Topic topic, Command cmd) {
 // =============================================================================
 
 bool DataRouter::publishPacket(Topic topic, const void* data, size_t len) {
-    // Обновляем кэш пакета
+    if (!data || len == 0) {
+        return false;
+    }
+    
     xSemaphoreTake(_mutex, portMAX_DELAY);
     TopicRouter& tr = _topicRouters[topic];
     tr.packetValid = true;
@@ -281,9 +302,10 @@ bool DataRouter::publishPacket(Topic topic, const void* data, size_t len) {
 // =============================================================================
 
 bool DataRouter::publishString(Topic topic, const char* str) {
-    // Копируем строку в буфер с нуль-паддингом до 2048 байт.
-    // xQueueSend/Overwrite копирует РОВНО itemSize байт, поэтому
-    // нужно чтобы за строкой шли нули, а не мусор памяти.
+    if (!str) {
+        return false;
+    }
+    
     static char txBuf[2048];
     xSemaphoreTake(_mutex, portMAX_DELAY);
     memset(txBuf, 0, sizeof(txBuf));
@@ -337,7 +359,7 @@ uint32_t DataRouter::getDropCount(Topic topic) {
 }
 
 // =============================================================================
-// printStats
+// printStats — оставлено для отладки
 // =============================================================================
 
 void DataRouter::printStats() {
@@ -349,7 +371,7 @@ void DataRouter::printStats() {
             for (int i = 0; i < tr.subCount; i++) {
                 drops += tr.subs[i].dropCount;
             }
-            DBG_PRINTF("Topic %d: %d subs, %lu drops\n", t, tr.subCount, drops);
+            DBG_PRINTF("Topic %d: %d subs, %lu drops", t, tr.subCount, drops);
         }
     }
     DBG_PRINTLN("========================");

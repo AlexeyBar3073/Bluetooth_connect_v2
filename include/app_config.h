@@ -25,7 +25,7 @@
 //   - Забывать обновлять AGENTS.md при изменении версии
 //   - Устанавливать MAJOR=0 для продакшн-версии
 //
-// ВЕРСИЯ: 6.6.0 — OTA Task (специфическая задача, msg_id/ack_id гарантия)
+// ВЕРСИЯ: 6.8.22 — Интеграция task_common framework (полная очистка ресурсов при OTA)
 // -----------------------------------------------------------------------------
 
 #ifndef APP_CONFIG_H
@@ -39,13 +39,21 @@
 //
 // MAJOR (6) — DataRouter: типизированные топики, очереди у модулей
 // MINOR (8) — OTA Task + BT transport оптимизация
-// BUILD (21) — OTA Task запускается по запросу (не в setup), экономия RAM
+// BUILD (22) — task_common framework: полная очистка ресурсов при OTA
+//              (отписка от топиков, удаление очередей, освобождение аппаратных драйверов)
+//
+// История изменений BUILD:
+//   21 — OTA Task запускается по запросу (не в setup), экономия RAM
+//   22 — task_common framework: унифицированная обработка CMD_OTA_START,
+//        автоматическая очистка подписок и очередей, предотвращение утечек памяти.
+//        Адаптированы модули: Climate, K-Line, Storage, Calculator, Simulator, RealEngine.
+//        Исправлен комментарий к INJECTOR_PIN (LOW = открыта).
 //
 #define FW_VERSION_MAJOR 6
 #define FW_VERSION_MINOR 8
-#define FW_VERSION_BUILD 21
-#define FW_VERSION_STR   "6.8.21"
-#define FW_VERSION_NOTE  "OTA: lazy task start, dispatch safety net"
+#define FW_VERSION_BUILD 23
+#define FW_VERSION_STR   "6.8.23"
+#define FW_VERSION_NOTE  "task_common: unified OTA cleanup, no memory leaks"
 
 // =============================================================================
 // Аппаратные пины
@@ -59,8 +67,8 @@
 // Реальный двигатель (REAL_ENGINE_ENABLED=1)
 // =============================================================================
 
-#define INJECTOR_PIN        4     // Форсунка (оптопара, положительный фронт)
-#define SHAFT_PIN           13    // Датчик выходного вала (геркон)
+#define INJECTOR_PIN        4     // Форсунка (оптопара 6N137, LOW = открыта)
+#define SHAFT_PIN           13    // Датчик скорости VSS (PCNT, rising edge)
 #define VOLTAGE_ADC_PIN     32    // ADC напряжения бортсети (опционально)
 
 // =============================================================================
@@ -81,14 +89,14 @@
 // =============================================================================
 //
 // Распределение по приоритетам:
-//   3 — Protocol (JSON-обработка команд Android)
+//   3 — Protocol (JSON-обработка команд Android), OTA (обновление прошивки)
 //   2 — Simulator (физика автомобиля), Calculator (расчёт TripPack)
 //   1 — Storage (NVS), OLED (дисплей), K-Line (диагностика), Climate
 //   0 — Не используется (резерв)
 //
 #define TASK_PRIORITY_SIMULATOR  2
 #define TASK_PRIORITY_CALCULATOR 2
-#define TASK_PRIORITY_PROTOCOL   3
+#define TASK_PRIORITY_PROTOCOL   2
 #define TASK_PRIORITY_OLED       1
 #define TASK_PRIORITY_STORAGE    1
 #define TASK_PRIORITY_KLINE      1
@@ -104,7 +112,7 @@
 
 #define TASK_STACK_SIZE       3072   // Стандарт (Sim, Calc, Storage, OLED, RealEngine)
 #define TASK_STACK_PROTOCOL   6144   // Protocol (ArduinoJson + OTA обработка)
-#define TASK_STACK_CLIMATE    1536   // Минимальный
+#define TASK_STACK_CLIMATE    2048   // Увеличено для task_common + DEBUG_LOG
 #define TASK_STACK_OTA        4096   // OTA Task (Update.h + OtaChunkPack)
 #define TASK_STACK_BT         4096   // BT_Transport (static txBuffer/temp)
 

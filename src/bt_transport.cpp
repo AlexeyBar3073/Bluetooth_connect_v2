@@ -17,7 +17,7 @@
 //   - TX-очередь 2048 байт — пиковые нагрузки OTA-чанков
 //   - Динамическая задержка — 0 при >70% заполнения
 //
-// ВЕРСИЯ: 6.8.14 — BT Transport: watermark, backpressure, adaptive parse
+// ВЕРСИЯ: Определяется в app_config.h (FW_VERSION_STR)
 // -----------------------------------------------------------------------------
 
 #include "bt_transport.h"
@@ -33,7 +33,7 @@ static BluetoothSerial SerialBT;
 // Ring Buffer — 8KB для burst-proof
 // =============================================================================
 
-#define RX_RING_SIZE  8192
+#define RX_RING_SIZE  10000
 
 static uint8_t rxRing[RX_RING_SIZE];
 static size_t rxHead = 0;
@@ -99,22 +99,25 @@ static QueueHandle_t   txQueue = NULL;
 // =============================================================================
 // btTransportTask — одна задача, но с chunked processing
 // =============================================================================
-
 void btTransportTask(void* parameter) {
     (void)parameter;
+
     isRunningFlag = true;
     DataRouter& dr = DataRouter::getInstance();
 
     // Исходящие данные (OVERWRITE — не блокируем отправку)
-    txQueue = xQueueCreate(1, 2048);  // Увеличено до 2048 для пиковых нагрузок OTA
+    txQueue = xQueueCreate(1, 2048);
     dr.subscribe(TOPIC_MSG_OUTGOING, txQueue, QueuePolicy::OVERWRITE);
 
-    // Временный буфер для чтения из BT — static, чтобы не占用 стек задачи
+    // Временный буфер для чтения из BT
     static uint8_t temp[512];
 
-    // Буфер для сборки строки — 2048 достаточно для OTA-чанка JSON (~1450 байт)
-    static char lineBuffer[2048];
+    // Буфер для сборки строки
+    static char lineBuffer[2500];
     static size_t linePos = 0;
+   
+    // Устанавливаем минимальный таймаут для объекта Bluetooth
+    SerialBT.setTimeout(1); 
 
     DBG_PRINTLN("[BT Transport] Task running (watermark, adaptive parse)");
 
@@ -123,27 +126,45 @@ void btTransportTask(void* parameter) {
 
         // --- 1. Статус подключения ---
         bool isConnected = SerialBT.hasClient();
-        if (isConnected != wasConnected) {
+        if (isConnected != wasConnected)
+        {
             wasConnected = isConnected;
+
+            // Даём Bluetooth-стеку время на handshake
+            if (isConnected)
+            {
+                vTaskDelay(500 / portTICK_PERIOD_MS);
+            }
             dr.publish(TOPIC_TRANSPORT_STATUS, isConnected);
+            DBG_PRINTF("[BT] Client %s", isConnected ? "connected!" : "disconnected!");
         }
 
-        // --- 2. RX: Чтение из Bluetooth (ПРИОРИТЕТ №1, backpressure-aware) ---
-        if (isConnected && !rxBackpressure && SerialBT.available()) {
+        // --- 2. RX: Чтение из Bluetooth (ПРИОРИТЕТ №1) ---
+        if (isConnected && SerialBT.available())
+        {
             size_t available = SerialBT.available();
             size_t toRead = (available > sizeof(temp)) ? sizeof(temp) : available;
-            if (toRead > rbFree()) toRead = rbFree();  // Не читать больше свободного места
 
-            if (toRead > 0) {
-                size_t actuallyRead = SerialBT.readBytes((char*)temp, toRead);
-                for (size_t i = 0; i < actuallyRead; i++) {
-                    if (!rbPush(temp[i])) {
-                        rxBackpressure = true;
-                        DBG_PRINTF("[BT] Buffer full (%d/%d), backpressure ON\n",
-                                  (int)rbUsed(), RX_RING_SIZE);
-                        break;
-                    }
+            if (rbFree() >= toRead)
+            {
+                // Есть место — пишем в RingBuffer
+                size_t actuallyRead = SerialBT.readBytes((char *)temp, toRead);
+                for (size_t i = 0; i < actuallyRead; i++)
+                {
+                    rbPush(temp[i]);
                 }
+                rxBackpressure = false;
+            }
+            else
+            {
+                // Кольцевой буфер полон → ПРИНУДИТЕЛЬНО выгребаем SerialBT,
+                // чтобы ESP-IDF не дропал данные на уровне стека (RX Full!)
+                // Данные теряются, но OTA-протокол запросит повтор через ota_replay
+                while (SerialBT.available())
+                {
+                    SerialBT.read();
+                }
+                rxBackpressure = true;
             }
         }
 
@@ -181,19 +202,16 @@ void btTransportTask(void* parameter) {
         }
 
         // --- Backpressure: возобновление при draining ---
-        if (rxBackpressure && rbUsed() < RX_WATERMARK_LOW) {
+        if (rxBackpressure && rbUsed() < RX_WATERMARK_LOW)
+        {
             rxBackpressure = false;
-            DBG_PRINTLN("[BT] Buffer drained, backpressure OFF");
         }
 
         // --- 4. TX: TOPIC_MSG_OUTGOING → Android (без ожидания) ---
         if (isConnected && txQueue) {
-            static char txBuffer[2048];  // static — не占用 стек цикла
+            static char txBuffer[2048];
             if (xQueueReceive(txQueue, txBuffer, 0) == pdTRUE) {
-                size_t len = strlen(txBuffer) + 1;  // +1 за '\n'
-                // Отправляем только если в SPP-буфере есть место под всё сообщение.
-                // Если места нет — пакет дропается (OVERWRITE: новый заменит старый).
-                // Это предотвращает SPP Write Congested при заторах.
+                size_t len = strlen(txBuffer) + 1;
                 int avail = SerialBT.availableForWrite();
                 if (avail <= 0 || (size_t)avail >= len) {
                     SerialBT.print(txBuffer);
@@ -202,7 +220,7 @@ void btTransportTask(void* parameter) {
             }
         }
 
-        // --- Динамическая задержка: 0 при >70% заполнения, иначе 1 тик ---
+        // --- Динамическая задержка ---
         vTaskDelay(rbUsed() > RX_WATERMARK_HIGH ? 0 : 1);
     }
 }
@@ -212,37 +230,48 @@ void btTransportTask(void* parameter) {
 // =============================================================================
 
 void btTransportStart(const char* deviceName) {
-    if (btTaskHandle) return;
-
-    // Проверка кучи перед BT-init — Bluedroid требует ≥30 КБ
-    if (ESP.getFreeHeap() < 30000) {
-        DBG_PRINTF("[BT] Low heap (%u < 30000). Waiting for stabilization...\n", ESP.getFreeHeap());
-        delay(2000);
-        if (ESP.getFreeHeap() < 28000) {
-            DBG_PRINTF("[BT] Init ABORTED (heap still too low: %u)\n", ESP.getFreeHeap());
-            return;
-        }
+    if (btTaskHandle) {
+        DBG_PRINTLN("[BT] Already started, skipping");
+        return;
     }
 
-    // Увеличенная задержка — обход бага ESP-IDF HCI HAL crash
-    DBG_PRINTF("[BT Transport] Initializing '%s'...\n", deviceName);
+    unsigned long freeHeap = ESP.getFreeHeap();
+    DBG_PRINTF("[BT] Free heap before init: %u bytes", freeHeap);
+
+    // Проверка кучи перед BT-init — Bluedroid требует ≥30 КБ
+    if (freeHeap < 30000) {
+        DBG_PRINTF("[BT] WARNING: Low heap (%u < 30000). Waiting for stabilization...", freeHeap);
+        delay(2000);
+        freeHeap = ESP.getFreeHeap();
+        
+        if (freeHeap < 28000) {
+            DBG_PRINTF("[BT] FATAL: Init ABORTED! Heap still too low: %u bytes (need 28000)", freeHeap);
+            DBG_PRINTLN("[BT] Bluetooth will NOT be available!");
+            return;
+        }
+        DBG_PRINTF("[BT] Heap stabilized at %u bytes, continuing...", freeHeap);
+    }
+
+    DBG_PRINTF("[BT Transport] Initializing '%s'...", deviceName);
     delay(800);
 
-    DBG_PRINTF("[BT Transport] Free heap: %u, max_alloc: %u\n",
+    DBG_PRINTF("[BT Transport] Free heap: %u, max_alloc: %u",
               (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
 
     if (!SerialBT.begin(deviceName)) {
-        DBG_PRINTLN("[BT Transport] Init FAILED!");
+        DBG_PRINTLN("[BT] FATAL: Init FAILED!");
+        DBG_PRINTLN("[BT] Bluetooth will NOT be available!");
         return;
     }
-    SerialBT.setTimeout(1);  // 1ms — readBytes не блокируется дольше
-    DBG_PRINTF("[BT Transport] Started: '%s'\n", deviceName);
+    
+    SerialBT.setTimeout(100);
+    DBG_PRINTF("[BT Transport] Started successfully: '%s'", deviceName);
 
     wasConnected = SerialBT.hasClient();
     DataRouter::getInstance().publish(TOPIC_TRANSPORT_STATUS, wasConnected);
 
-    // Ядро 1, приоритет 2
-    xTaskCreatePinnedToCore(btTransportTask, "BT_Transport", TASK_STACK_BT, NULL, 2, &btTaskHandle, 1);
+    // Ядро 0, приоритет 2 (высший на ядре 0)
+    xTaskCreatePinnedToCore(btTransportTask, "BT_Transport", TASK_STACK_BT, NULL, 2, &btTaskHandle, 0);
 }
 
 void btTransportStop() {
@@ -251,7 +280,14 @@ void btTransportStop() {
         btTaskHandle = NULL;
         isRunningFlag = false;
         SerialBT.end();
+        DBG_PRINTLN("[BT Transport] Stopped");
     }
 }
 
-bool btIsConnected() { return SerialBT.hasClient(); }
+bool btIsConnected() { 
+    return SerialBT.hasClient(); 
+}
+
+bool btIsRunning() { 
+    return btTaskHandle != NULL; 
+}

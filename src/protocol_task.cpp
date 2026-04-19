@@ -10,11 +10,19 @@
 // - Квитанции (msg_id → ack_id): только Protocol знает про них
 //
 // -----------------------------------------------------------------------------
-// ВЕРСИЯ: 5.1.0 — MAJOR: KlinePack/ClimatePack, квитанции только в Protocol
+// ВЕРСИЯ: Определяется в app_config.h (FW_VERSION_STR)
+// -----------------------------------------------------------------------------
+// Обновление (интеграция с task_common):
+// - Использует taskInit() для инициализации и подписки на TOPIC_CMD
+// - Регистрирует подписки через taskRegisterSubscription()
+// - taskHeartbeat() обновляет счётчик для loop()-мониторинга
+// - Protocol НЕ завершается при CMD_OTA_START (продолжает обработку OTA-чанков)
+// - Исправлен порядок OTA-ответа: сначала ota_init, потом CMD_OTA_START
 // -----------------------------------------------------------------------------
 
 #include "protocol_task.h"
 #include "data_router.h"
+#include "task_common.h"
 #include "topics.h"
 #include "packets.h"
 #include "commands.h"
@@ -27,22 +35,37 @@
 // =============================================================================
 // Конфигурация
 // =============================================================================
-#define FAST_MS    100
+#define FAST_MS 150
 
 // =============================================================================
 // Глобальные переменные
 // =============================================================================
 
-static TaskHandle_t  taskHandle       = NULL;
-static bool          isRunningFlag    = false;
-static unsigned long lastHeartbeat    = 0;
-static bool          isStreamingActive = false;
+static TaskHandle_t taskHandle = NULL;
+static bool isRunningFlag = false;
+static unsigned long lastHeartbeat = 0;
+
+// --- Контекст задачи (фреймворк task_common) ---
+static TaskContext ctx = {0};
+
+// --- Очереди для подписки на данные ---
+static QueueHandle_t engineQ = NULL;
+static QueueHandle_t tripQ = NULL;
+static QueueHandle_t klineQ = NULL;
+static QueueHandle_t climateQ = NULL;
+static QueueHandle_t settingsQ = NULL;
+static QueueHandle_t incomingQ = NULL;
+static QueueHandle_t otaResultQ = NULL;
+
+// --- Флаг активности стриминга телеметрии ---
+static bool isStreamingActive = false;
 
 // --- Квитанция доставки (msg_id → ack_id) ---
 static int lastMsgId = 0;
 
 // --- Кэш телеметрии (обновляется из очередей пакетов) ---
-static struct {
+static struct
+{
     // EnginePack
     float speed = 0, rpm = 0, voltage = 0, inst_fuel = 0;
     float fuel_level = 0;
@@ -55,7 +78,7 @@ static struct {
     float t_cool = 0, t_atf = 0;
     float voltage_kl = 0, fuel_pct = 0, out_shaft = 0;
     bool tcc = false;
-    uint8_t selector = 3;  // D
+    uint8_t selector = 3; // D
     uint8_t gear = 0;
     char dtc[64] = "";
     // ClimatePack
@@ -64,30 +87,30 @@ static struct {
 } tel;
 
 // --- Кэш настроек ---
-static struct {
+static struct
+{
     float tank = 60.0f, inj_perf = 250.0f, spd_sig = 3.0f;
     uint8_t inj_cnt = 4, kl_proto = 0;
 } cfg;
 
 // --- OTA состояние (для формирования ota_init и ack) ---
-static struct {
+static struct
+{
     int totalChunks = 0;
     int chunkSize = OTA_CHUNK_BIN_SIZE;
 } ota;
 
 static char outBuffer[512];
-
-// Буфер для входящих JSON — статический (не на стеке), 2048 байт
-// OTA-чанк JSON ~1420 байт (bin=1368 base64 + pack + ack_id)
 static char rxIncomingBuffer[2048];
 
 // =============================================================================
 // processEnginePack
 // =============================================================================
-
-static void processEnginePack(QueueHandle_t q) {
+static void processEnginePack(QueueHandle_t q)
+{
     EnginePack p;
-    if (xQueueReceive(q, &p, 0) == pdTRUE) {
+    if (xQueueReceive(q, &p, 0) == pdTRUE)
+    {
         tel.speed = p.speed;
         tel.rpm = p.rpm;
         tel.voltage = p.voltage;
@@ -101,10 +124,11 @@ static void processEnginePack(QueueHandle_t q) {
 // =============================================================================
 // processTripPack
 // =============================================================================
-
-static void processTripPack(QueueHandle_t q) {
+static void processTripPack(QueueHandle_t q)
+{
     TripPack p;
-    if (xQueueReceive(q, &p, 0) == pdTRUE) {
+    if (xQueueReceive(q, &p, 0) == pdTRUE)
+    {
         tel.odo = p.odo;
         tel.trip_a = p.trip_a;
         tel.fuel_a = p.fuel_trip_a;
@@ -121,10 +145,11 @@ static void processTripPack(QueueHandle_t q) {
 // =============================================================================
 // processKlinePack
 // =============================================================================
-
-static void processKlinePack(QueueHandle_t q) {
+static void processKlinePack(QueueHandle_t q)
+{
     KlinePack p;
-    if (xQueueReceive(q, &p, 0) == pdTRUE) {
+    if (xQueueReceive(q, &p, 0) == pdTRUE)
+    {
         tel.t_cool = p.coolant_temp;
         tel.t_atf = p.atf_temp;
         tel.voltage_kl = p.voltage;
@@ -140,10 +165,11 @@ static void processKlinePack(QueueHandle_t q) {
 // =============================================================================
 // processClimatePack
 // =============================================================================
-
-static void processClimatePack(QueueHandle_t q) {
+static void processClimatePack(QueueHandle_t q)
+{
     ClimatePack p;
-    if (xQueueReceive(q, &p, 0) == pdTRUE) {
+    if (xQueueReceive(q, &p, 0) == pdTRUE)
+    {
         tel.t_int = p.interior_temp;
         tel.t_ext = p.exterior_temp;
         tel.tire = p.tire_pressure;
@@ -154,10 +180,11 @@ static void processClimatePack(QueueHandle_t q) {
 // =============================================================================
 // processSettingsPack
 // =============================================================================
-
-static void processSettingsPack(QueueHandle_t q) {
+static void processSettingsPack(QueueHandle_t q)
+{
     SettingsPack p;
-    if (xQueueReceive(q, &p, 0) == pdTRUE) {
+    if (xQueueReceive(q, &p, 0) == pdTRUE)
+    {
         cfg.tank = p.tank_capacity;
         cfg.inj_perf = p.injector_flow;
         cfg.inj_cnt = p.injector_count;
@@ -169,19 +196,19 @@ static void processSettingsPack(QueueHandle_t q) {
 // =============================================================================
 // Forward declarations
 // =============================================================================
-
-static void buildFastJson(JsonDocument& doc);
-static void addTripFields(JsonDocument& doc);
-static void addServiceFields(JsonDocument& doc);
-static void injectAckId(JsonDocument& doc);
-static void publishOutgoing(JsonDocument& doc);
+static void buildFastJson(JsonDocument &doc);
+static void addTripFields(JsonDocument &doc);
+static void addServiceFields(JsonDocument &doc);
+static void injectAckId(JsonDocument &doc);
+static void publishOutgoing(JsonDocument &doc);
 
 // =============================================================================
 // injectAckId: Подмешивает ack_id если есть квитанция, обнуляет lastMsgId
 // =============================================================================
-
-static void injectAckId(JsonDocument& doc) {
-    if (lastMsgId != 0) {
+static void injectAckId(JsonDocument &doc)
+{
+    if (lastMsgId != 0)
+    {
         doc["ack_id"] = lastMsgId;
         lastMsgId = 0;
     }
@@ -190,45 +217,44 @@ static void injectAckId(JsonDocument& doc) {
 // =============================================================================
 // publishOutgoing: Сериализует JSON и публикует в шину → BT Transport
 // =============================================================================
-
-static void publishOutgoing(JsonDocument& doc) {
+static void publishOutgoing(JsonDocument &doc)
+{
     serializeJson(doc, outBuffer, sizeof(outBuffer));
     outBuffer[sizeof(outBuffer) - 1] = '\0';
-
-    // Только в шину — BT Transport сам отправит через TX-очередь
     DataRouter::getInstance().publishString(TOPIC_MSG_OUTGOING, outBuffer);
 }
 
 // =============================================================================
 // processIncoming: Обработка входящих JSON-команд
 // =============================================================================
-
-static void processIncoming(QueueHandle_t q) {
-    while (xQueueReceive(q, rxIncomingBuffer, 0) == pdTRUE) {
-
+static void processIncoming(QueueHandle_t q)
+{
+    while (xQueueReceive(q, rxIncomingBuffer, 0) == pdTRUE)
+    {
         JsonDocument doc;
         DeserializationError err = deserializeJson(doc, rxIncomingBuffer);
-        if (err) {
-            DBG_PRINTF("[Proto] JSON parse error: %s (free heap: %d)\n",
-                          err.c_str(), (int)ESP.getFreeHeap());
+        if (err)
+        {
+            DBG_PRINTF("[Proto] JSON parse error: %s", err.c_str());
             JsonDocument resp;
             resp["error"] = "Invalid JSON";
             publishOutgoing(resp);
             continue;
         }
 
-        const char* cmd = doc["command"];
+        const char *cmd = doc["command"];
         if (!cmd) cmd = doc["cmd"];
         if (!cmd) continue;
 
-        // Извлекаем msg_id
         JsonVariant msgIdVar = doc["msg_id"];
-        if (!msgIdVar.isNull() && msgIdVar.is<int>()) {
+        if (!msgIdVar.isNull() && msgIdVar.is<int>())
+        {
             lastMsgId = msgIdVar.as<int>();
         }
 
         // --- get_cfg ---
-        if (strcmp(cmd, "get_cfg") == 0) {
+        if (strcmp(cmd, "get_cfg") == 0)
+        {
             JsonDocument resp;
             injectAckId(resp);
             JsonObject c = resp["cfg"].to<JsonObject>();
@@ -239,13 +265,16 @@ static void processIncoming(QueueHandle_t q) {
             c["kPrt"] = cfg.kl_proto;
             c["fw"] = FW_VERSION_STR;
             publishOutgoing(resp);
+            DBG_PRINTF("[Proto] get_cfg sent, ack_id=%d", lastMsgId);
             continue;
         }
 
         // --- set_cfg ---
-        if (strcmp(cmd, "set_cfg") == 0) {
+        if (strcmp(cmd, "set_cfg") == 0)
+        {
             JsonObject data = doc["data"];
             if (!data) data = doc.as<JsonObject>();
+            
             SettingsPack pack;
             memset(&pack, 0, sizeof(pack));
             pack.version = 1;
@@ -266,109 +295,125 @@ static void processIncoming(QueueHandle_t q) {
             JsonDocument resp;
             injectAckId(resp);
             publishOutgoing(resp);
+            DBG_PRINTF("[Proto] set_cfg sent, ack_id=%d", lastMsgId);
             continue;
         }
 
         // --- ota_update — начать OTA обновление ---
-        if (strcmp(cmd, "ota_update") == 0) {
+        if (strcmp(cmd, "ota_update") == 0)
+        {
             int fwSize = doc["size"];
-            DBG_PRINTF("[Proto] ota_update: size=%d, ack_id=%d\n", fwSize, lastMsgId);
-            if (fwSize > 0) {
-                // Останавливаем телеметрию
-                isStreamingActive = false;
+            DBG_PRINTF("[Proto] ota_update: size=%d, ack_id=%d", fwSize, lastMsgId);
+            DBG_NEWLINE();
+            DBG_PRINTLN("--- OTA Memory State [Protocol] ---");
+            DBG_PRINTF("[Proto] Free Heap: %u bytes", (unsigned)ESP.getFreeHeap());
+            DBG_PRINTF("[Proto] Min Free Heap: %u bytes", (unsigned)ESP.getMinFreeHeap());
+            DBG_PRINTF("[Proto] Max Alloc Block: %u bytes", (unsigned)ESP.getMaxAllocHeap());
+            DBG_PRINTLN("-----------------------------------");
 
-                // Сохраняем для ota_init ответа
+            if (fwSize > 0)
+            {
+                isStreamingActive = false;
                 ota.totalChunks = (fwSize + OTA_CHUNK_BIN_SIZE - 1) / OTA_CHUNK_BIN_SIZE;
                 ota.chunkSize = OTA_CHUNK_BIN_SIZE;
 
-                // Публикуем CMD_OTA_START — остальные задачи завершатся
+                DBG_PRINTF("[Proto] ota_init sent: chunkSize=%d, count=%d, ack_id=%d", ota.chunkSize, ota.totalChunks, lastMsgId);
+
+                // === ШАГ 1: ТЕПЕРЬ ПУБЛИКУЕМ CMD_OTA_START ===  
                 DataRouter::getInstance().publish(TOPIC_CMD, CMD_OTA_START);
+                vTaskDelay(100 / portTICK_PERIOD_MS);
+                DBG_PRINTF("[Proto] Free Heap: %u bytes", (unsigned)ESP.getFreeHeap());
 
-                // OTA Task запускается лениво внутри otaBeginUpdate
+                // === ШАГ 2: ЗАПУСКАЕМ OTA TASK ===
                 otaBeginUpdate((size_t)fwSize);
+                vTaskDelay(100 / portTICK_PERIOD_MS);
 
-                // Формируем ota_init прямо здесь — OTA Task готова сразу
+                // === ШАГ 3: ОТВЕЧАЕМ ANDROID ===
                 JsonDocument doc;
                 doc["ack_id"] = lastMsgId;
-                doc["ota_init"].to<JsonObject>()["size"]  = ota.chunkSize;
-                doc["ota_init"].to<JsonObject>()["count"] = ota.totalChunks;
+                JsonObject ota_init = doc["ota_init"].to<JsonObject>();
+                ota_init["size"] = ota.chunkSize;
+                ota_init["count"] = ota.totalChunks;
                 publishOutgoing(doc);
-                DBG_PRINTF("[Proto] ota_init sent: chunkSize=%d, count=%d, ack_id=%d\n",
-                              ota.chunkSize, ota.totalChunks, lastMsgId);
-            } else {
+                doc = nullptr;
+            }
+            else
+            {
                 DBG_PRINTLN("[Proto] ota_update: INVALID SIZE");
                 JsonDocument resp;
                 resp["error"] = "invalid_size";
+                injectAckId(resp);
                 publishOutgoing(resp);
             }
             continue;
         }
 
-        // --- ota_data — порция данных прошивки → OtaChunkPack в шину → СРАЗУ ack_id ---
-        if (strcmp(cmd, "ota_data") == 0) {
+        // --- ota_data — порция данных прошивки ---
+        if (strcmp(cmd, "ota_data") == 0)
+        {
             int pack = doc["data"]["pack"];
-            const char* b64 = doc["data"]["bin"];
+            const char *b64 = doc["data"]["bin"];
 
-            // Извлекаем CRC16 если есть (Android может не отправлять для старых версий)
             uint16_t crc = 0;
-            if (doc["data"]["crc16"].is<uint16_t>()) {
+            if (doc["data"]["crc16"].is<uint16_t>())
+            {
                 crc = doc["data"]["crc16"].as<uint16_t>();
             }
 
-            if (b64 && pack > 0 && strlen(b64) <= OTA_CHUNK_B64_SIZE) {
-                // Формируем типизированный пакет — static чтобы не占用 1375 байт стека
+            DBG_PRINTF("[Proto] ota_data received: pack=%d", pack);
+
+            if (b64 && pack > 0 && strlen(b64) <= OTA_CHUNK_B64_SIZE)
+            {
                 static OtaChunkPack otaPack;
                 otaPack.pack = static_cast<uint16_t>(pack);
                 otaPack.crc16 = crc;
                 otaPack.b64_len = static_cast<uint16_t>(strlen(b64));
                 memcpy(otaPack.b64, b64, otaPack.b64_len);
-                otaPack.b64[otaPack.b64_len] = '\0';  // Нуль-терминатор
+                otaPack.b64[otaPack.b64_len] = '\0';
 
-                // Публикуем через механизм пакетов (прямой memcpy в очередь)
-                bool sent = DataRouter::getInstance().publishPacket(
-                    TOPIC_OTA_CHUNK_PACK,
-                    &otaPack,
-                    sizeof(OtaChunkPack)
-                );
-                DBG_PRINTF("[Proto] publishPacket pack=%d, dispatched=%d\n", pack, sent ? 1 : 0);
+                DataRouter::getInstance().publishPacket(
+                    TOPIC_OTA_CHUNK_PACK, &otaPack, sizeof(OtaChunkPack));
             }
 
-            // ack_id — БЕЗУСЛОВНЫЙ ответ, не ждём OTA
             JsonDocument ack;
             ack["ack_id"] = lastMsgId;
             publishOutgoing(ack);
+            DBG_PRINTF("[Proto] ota_data ack sent: pack=%d, ack_id=%d", pack, lastMsgId);
             continue;
         }
 
-        // --- ota_end — завершение OTA → команда в OTA Task ---
-        if (strcmp(cmd, "ota_end") == 0) {
+        // --- ota_end — завершение OTA ---
+        if (strcmp(cmd, "ota_end") == 0)
+        {
             DBG_PRINTLN("[Proto] ota_end received, sending CMD_OTA_END");
-            Serial.println("[Proto] ota_end received, sending CMD_OTA_END");
 
-            // Сразу отвечаем Android — он открывает диалог ожидания перезагрузки
             JsonDocument resp;
             injectAckId(resp);
             resp["ota_restart"] = 1;
             publishOutgoing(resp);
+            DBG_PRINTLN("[Proto] ota_restart sent");
 
-            // Затем финализация OTA Task
             DataRouter::getInstance().publish(TOPIC_CMD, CMD_OTA_END);
             continue;
         }
 
         // --- start/stop_telemetry ---
-        if (strcmp(cmd, "start_telemetry") == 0) {
+        if (strcmp(cmd, "start_telemetry") == 0)
+        {
             JsonDocument resp;
             injectAckId(resp);
             publishOutgoing(resp);
             isStreamingActive = true;
+            DBG_PRINTLN("[Proto] Telemetry STARTED");
             continue;
         }
-        if (strcmp(cmd, "stop_telemetry") == 0) {
+        if (strcmp(cmd, "stop_telemetry") == 0)
+        {
             JsonDocument resp;
             injectAckId(resp);
             publishOutgoing(resp);
             isStreamingActive = false;
+            DBG_PRINTLN("[Proto] Telemetry STOPPED");
             continue;
         }
 
@@ -383,14 +428,17 @@ static void processIncoming(QueueHandle_t q) {
         else if (strcmp(cmd, "kl_reset_adapt") == 0) enumCmd = CMD_KL_RESET_ADAPT;
         else if (strcmp(cmd, "kl_pump_atf") == 0) enumCmd = CMD_KL_PUMP_ATF;
         else if (strcmp(cmd, "kl_detect_protocol") == 0) enumCmd = CMD_KL_DETECT_PROTO;
-        else if (strcmp(cmd, "calibrate_speed_start") == 0) {
+        else if (strcmp(cmd, "calibrate_speed_start") == 0)
+        {
             DataRouter::getInstance().publish(TOPIC_CMD, CMD_CALIBRATE_SPEED);
             JsonDocument resp;
             injectAckId(resp);
             resp["status"] = "calibration_started";
             publishOutgoing(resp);
             continue;
-        } else if (strcmp(cmd, "calibrate_speed_end") == 0) {
+        }
+        else if (strcmp(cmd, "calibrate_speed_end") == 0)
+        {
             int distanceM = 0;
             if (doc["data"].is<int>()) distanceM = doc["data"].as<int>();
             else if (doc["data"]["distance_m"].is<int>()) distanceM = doc["data"]["distance_m"].as<int>();
@@ -400,15 +448,17 @@ static void processIncoming(QueueHandle_t q) {
             resp["status"] = "calibration_saved";
             publishOutgoing(resp);
             continue;
-        } else if (strcmp(cmd, "correct_odo") == 0) {
+        }
+        else if (strcmp(cmd, "correct_odo") == 0)
+        {
             int odo_value = 0;
             if (doc["data"].is<int>()) odo_value = doc["data"].as<int>();
             else if (doc["data"]["value"].is<int>()) odo_value = doc["data"]["value"].as<int>();
             DataRouter::getInstance().publish(TOPIC_CORRECT_ODO, odo_value);
             continue;
-        } else if (strcmp(cmd, "set_cfg") == 0) {
-            continue;
-        } else {
+        }
+        else
+        {
             JsonDocument resp;
             injectAckId(resp);
             resp["error"] = "Unknown command";
@@ -420,28 +470,28 @@ static void processIncoming(QueueHandle_t q) {
         JsonDocument resp;
         injectAckId(resp);
         publishOutgoing(resp);
+        DBG_PRINTF("[Proto] Command 0x%02X sent", enumCmd);
     }
 }
 
 // =============================================================================
 // buildFastJson
 // =============================================================================
-
-static void buildFastJson(JsonDocument& doc) {
+static void buildFastJson(JsonDocument &doc)
+{
     JsonObject t = doc["tel"].to<JsonObject>();
     t["spd"] = (int)tel.speed;
     t["rpm"] = (int)tel.rpm;
     t["vlt"] = roundf(tel.voltage * 10) / 10;
     t["eng"] = (int)tel.eng;
     t["hl"] = (int)tel.hl;
-    const char* selStr[] = {"P", "R", "N", "D", "3", "2", "L"};
-    const char* base = (tel.selector <= 6) ? selStr[tel.selector] : "D";
+    const char *selStr[] = {"P", "R", "N", "D", "3", "2", "L"};
+    const char *base = (tel.selector <= 6) ? selStr[tel.selector] : "D";
     char selBuf[8];
-    if (tel.gear > 0 && tel.selector == 3) {
+    if (tel.gear > 0 && tel.selector == 3)
         snprintf(selBuf, sizeof(selBuf), "%s%d", base, tel.gear);
-    } else {
+    else
         snprintf(selBuf, sizeof(selBuf), "%s", base);
-    }
     t["sel"] = selBuf;
     t["tcc"] = (int)tel.tcc;
     t["fuel"] = roundf(tel.fuel_level * 10) / 10;
@@ -450,8 +500,8 @@ static void buildFastJson(JsonDocument& doc) {
 // =============================================================================
 // addTripFields
 // =============================================================================
-
-static void addTripFields(JsonDocument& doc) {
+static void addTripFields(JsonDocument &doc)
+{
     JsonObject t = doc["tel"];
     t["odo"] = (int)tel.odo;
     t["trip_a"] = roundf(tel.trip_a * 10) / 10;
@@ -469,8 +519,8 @@ static void addTripFields(JsonDocument& doc) {
 // =============================================================================
 // addServiceFields
 // =============================================================================
-
-static void addServiceFields(JsonDocument& doc) {
+static void addServiceFields(JsonDocument &doc)
+{
     JsonObject t = doc["tel"];
     t["t_cool"] = roundf(tel.t_cool * 10) / 10;
     t["t_atf"] = roundf(tel.t_atf * 10) / 10;
@@ -482,77 +532,116 @@ static void addServiceFields(JsonDocument& doc) {
 }
 
 // =============================================================================
+// protocolCmdHandler — обработка специфичных команд модуля Protocol
+// =============================================================================
+static bool protocolCmdHandler(uint8_t cmd) {
+    switch ((Command)cmd) {
+        case CMD_OTA_START:
+            DBG_PRINTLN("[Protocol] CMD_OTA_START received — staying active");
+            return false;  // ← ВОЗВРАЩАЕМ false = НЕ ЗАВЕРШАТЬ ЗАДАЧУ!
+        case CMD_OTA_END:
+            DBG_PRINTLN("[Protocol] CMD_OTA_END received");
+            return true;
+        default:
+            return true;
+    }
+}
+
+// =============================================================================
 // protocolTask — Главная задача
 // =============================================================================
-
-void protocolTask(void* parameter) {
+void protocolTask(void *parameter)
+{
     (void)parameter;
-    isRunningFlag = true;
-    DataRouter& dr = DataRouter::getInstance();
+    
+    if (!taskInit(&ctx, "Protocol", &isRunningFlag, &lastHeartbeat)) {
+        DBG_PRINTLN("[Protocol] ERROR: taskInit failed!");
+        isRunningFlag = false;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    DataRouter &dr = DataRouter::getInstance();
 
-    QueueHandle_t engineQ   = xQueueCreate(1, sizeof(EnginePack));
-    QueueHandle_t tripQ     = xQueueCreate(1, sizeof(TripPack));
-    QueueHandle_t klineQ    = xQueueCreate(1, sizeof(KlinePack));
-    QueueHandle_t climateQ  = xQueueCreate(1, sizeof(ClimatePack));
-    QueueHandle_t settingsQ = xQueueCreate(1, sizeof(SettingsPack));
+    engineQ = xQueueCreate(1, sizeof(EnginePack));
+    tripQ = xQueueCreate(1, sizeof(TripPack));
+    klineQ = xQueueCreate(1, sizeof(KlinePack));
+    climateQ = xQueueCreate(1, sizeof(ClimatePack));
+    settingsQ = xQueueCreate(1, sizeof(SettingsPack));
+    incomingQ = xQueueCreate(1, 2048);
+    otaResultQ = xQueueCreate(3, sizeof(int));
 
-    dr.subscribe(TOPIC_ENGINE_PACK,   engineQ,   QueuePolicy::OVERWRITE);
-    dr.subscribe(TOPIC_TRIP_PACK,     tripQ,     QueuePolicy::OVERWRITE);
-    dr.subscribe(TOPIC_KLINE_PACK,    klineQ,    QueuePolicy::OVERWRITE);
-    dr.subscribe(TOPIC_CLIMATE_PACK,  climateQ,  QueuePolicy::OVERWRITE);
+    if (!engineQ || !tripQ || !klineQ || !climateQ || !settingsQ || !incomingQ || !otaResultQ) {
+        DBG_PRINTLN("[Protocol] ERROR: Failed to create queues!");
+        isRunningFlag = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    dr.subscribe(TOPIC_ENGINE_PACK, engineQ, QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_TRIP_PACK, tripQ, QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_KLINE_PACK, klineQ, QueuePolicy::OVERWRITE);
+    dr.subscribe(TOPIC_CLIMATE_PACK, climateQ, QueuePolicy::OVERWRITE);
     dr.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE, true);
-
-    QueueHandle_t incomingQ = xQueueCreate(1, 2048);
     dr.subscribe(TOPIC_MSG_INCOMING, incomingQ, QueuePolicy::OVERWRITE);
-
-    // Подписка на результат OTA (pack номер от OTA Task)
-    QueueHandle_t otaResultQ = xQueueCreate(3, sizeof(int));
     dr.subscribe(TOPIC_OTA_RESULT, otaResultQ, QueuePolicy::FIFO_DROP);
 
-    DBG_PRINTLN("[Protocol] Task started (DataRouter, Fractional: FAST 100ms, TRIP 500ms, SERVICE 1000ms)");
+    taskRegisterSubscription(&ctx, TOPIC_ENGINE_PACK, engineQ);
+    taskRegisterSubscription(&ctx, TOPIC_TRIP_PACK, tripQ);
+    taskRegisterSubscription(&ctx, TOPIC_KLINE_PACK, klineQ);
+    taskRegisterSubscription(&ctx, TOPIC_CLIMATE_PACK, climateQ);
+    taskRegisterSubscription(&ctx, TOPIC_SETTINGS_PACK, settingsQ);
+    taskRegisterSubscription(&ctx, TOPIC_MSG_INCOMING, incomingQ);
+    taskRegisterSubscription(&ctx, TOPIC_OTA_RESULT, otaResultQ);
 
     unsigned long lastSend = 0;
     int counter = 0;
 
-    while (1) {
-        lastHeartbeat = millis();
+    while (1)
+    {
+        taskHeartbeat(&ctx);
 
-        if (engineQ)   processEnginePack(engineQ);
-        if (tripQ)     processTripPack(tripQ);
-        if (klineQ)    processKlinePack(klineQ);
-        if (climateQ)  processClimatePack(climateQ);
+        if (engineQ) processEnginePack(engineQ);
+        if (tripQ) processTripPack(tripQ);
+        if (klineQ) processKlinePack(klineQ);
+        if (climateQ) processClimatePack(climateQ);
         if (settingsQ) processSettingsPack(settingsQ);
-
         if (incomingQ) processIncoming(incomingQ);
 
-        // --- Результат OTA (pack номер от OTA Task) ---
-        if (otaResultQ) {
+        taskProcessCommands(&ctx, protocolCmdHandler);
+
+        if (otaResultQ)
+        {
             int otaPack;
-            while (xQueueReceive(otaResultQ, &otaPack, 0) == pdTRUE) {
-                if (otaPack > 0) {
-                    // Успешная запись чанка — отправляем ack
+            while (xQueueReceive(otaResultQ, &otaPack, 0) == pdTRUE)
+            {
+                if (otaPack > 0)
+                {
                     JsonDocument doc;
                     doc["ota_read"] = otaPack;
                     doc["ack_id"] = lastMsgId;
                     publishOutgoing(doc);
-                } else {
-                    // Ошибка (абсолютное значение = pack номер) — запросить повтор
+                    DBG_PRINTF("[Proto] ota_read sent: pack=%d", otaPack);
+                }
+                else
+                {
                     JsonDocument doc;
-                    JsonObject replay = doc["ota_replay"].to<JsonObject>();
-                    replay["pack"] = -otaPack;
+                    doc["ota_replay"].to<JsonObject>()["pack"] = -otaPack;
                     publishOutgoing(doc);
-                    DBG_PRINTF("[Proto] OTA replay requested for pack %d\n", -otaPack);
+                    DBG_PRINTF("[Proto] OTA replay requested for pack %d", -otaPack);
                 }
             }
         }
 
-        if (!isStreamingActive) {
+        if (!isStreamingActive)
+        {
             vTaskDelay(10 / portTICK_PERIOD_MS);
             continue;
         }
 
         unsigned long now = millis();
-        if (now - lastSend >= 100) {
+        if (now - lastSend >= 100)
+        {
             lastSend = now;
             counter++;
 
@@ -562,7 +651,6 @@ void protocolTask(void* parameter) {
             buildFastJson(doc);
             if (counter % 5 == 0) addTripFields(doc);
             if (counter % 10 == 0) addServiceFields(doc);
-
             injectAckId(doc);
             publishOutgoing(doc);
         }
@@ -574,31 +662,28 @@ void protocolTask(void* parameter) {
 // =============================================================================
 // Управление
 // =============================================================================
-
-void protocolStart() {
-    if (!taskHandle) {
-        // СРАЗУ — чтобы loop() не думал что crashed
+void protocolStart()
+{
+    if (!taskHandle)
+    {
         lastHeartbeat = millis();
         isRunningFlag = true;
-        // Ядро 1 — Protocol (JSON-обработка команд Android)
-        xTaskCreatePinnedToCore(protocolTask, "Protocol", TASK_STACK_PROTOCOL, NULL, 3, &taskHandle, 1);
-#if DEBUG_LOG
-        Serial.println("[Protocol] Started");
-#endif
+        xTaskCreatePinnedToCore(protocolTask, "Protocol", TASK_STACK_PROTOCOL, NULL, 
+                                TASK_PRIORITY_PROTOCOL, &taskHandle, 1);
     }
 }
 
-void protocolStop() {
-    if (taskHandle) {
+void protocolStop()
+{
+    if (taskHandle)
+    {
         vTaskDelete(taskHandle);
         taskHandle = NULL;
         isRunningFlag = false;
-#if DEBUG_LOG
-        Serial.println("[Protocol] Stopped");
-#endif
     }
 }
 
-bool protocolIsRunning() {
+bool protocolIsRunning()
+{
     return isRunningFlag && (millis() - lastHeartbeat) < 3000;
 }

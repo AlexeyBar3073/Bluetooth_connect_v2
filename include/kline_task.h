@@ -19,6 +19,11 @@
 // - Адреса ECU: ECM=0x7E0, TCM=0x7E1, ABS=0x7E3
 //
 // Архитектура v6.1.0: DataRouter, типизированные топики, module-owned queues
+//
+// Обновление v6.8.22: Интеграция с task_common
+// - Автоматическая обработка CMD_OTA_START с полной очисткой ресурсов
+// - Единый heartbeat для мониторинга в loop()
+// - Регистрация подписок для корректной отписки при завершении
 // -----------------------------------------------------------------------------
 
 #ifndef KLINE_TASK_H
@@ -66,5 +71,11 @@ bool klineIsRunning();
 // klineIsConnected: Возвращает true если установлена связь с ECU.
 // Обновляется после каждой попытки инициализации.
 bool klineIsConnected();
+
+// Legacy-функции для обратной совместимости
+void klineRequestDTC();
+void klineClearDTC();
+void klineResetTCMAdaptation();
+void klineStartABSBleed();
 
 #endif // KLINE_TASK_H

@@ -92,30 +92,30 @@ void setup() {
     Serial.begin(115200);
     delay(2000);
     
-    Serial.println("\n=================================");
-    Serial.println("DataBus Unit Tests (ESP32)");
-    Serial.println("=================================\n");
+    DBG_PRINTLN("\n=================================");
+    DBG_PRINTLN("DataBus Unit Tests (ESP32)");
+    DBG_PRINTLN("=================================\n");
     
     UNITY_BEGIN();
     
-    Serial.println("Running: test_singleton");
+    DBG_PRINTLN("Running: test_singleton");
     RUN_TEST(test_singleton);
     
-    Serial.println("Running: test_publish_get_float");
+    DBG_PRINTLN("Running: test_publish_get_float");
     RUN_TEST(test_publish_get_float);
     
-    Serial.println("Running: test_publish_get_bool");
+    DBG_PRINTLN("Running: test_publish_get_bool");
     RUN_TEST(test_publish_get_bool);
     
-    Serial.println("Running: test_default_values");
+    DBG_PRINTLN("Running: test_default_values");
     RUN_TEST(test_default_values);
     
-    Serial.println("Running: test_callback");
+    DBG_PRINTLN("Running: test_callback");
     RUN_TEST(test_callback);
     
-    Serial.println("\n=================================");
-    Serial.println("All tests complete!");
-    Serial.println("=================================\n");
+    DBG_PRINTLN("\n=================================");
+    DBG_PRINTLN("All tests complete!");
+    DBG_PRINTLN("=================================\n");
     
     UNITY_END();
 }

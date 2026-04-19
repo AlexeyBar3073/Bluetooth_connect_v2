@@ -2,13 +2,11 @@
 // main.cpp
 // Точка входа и Loop-диспетчер процессов.
 //
-// Порядок инициализации:
-//   1. DataRouter → 2. Storage → 3. Simulator → 4. Calculator
-//   5. Protocol → 6. BT Transport → 7. K-Line → 8. Climate → 9. OLED
+// Архитектура:
+//   SETUP: запуск всех модулей
+//   LOOP:  мониторинг задач, перезапуск при падении
 //
-// Loop: heartbeat-мониторинг, перезапуск при падении.
-//
-// ВЕРСИЯ: 6.1.0 — K-Line и Climate подключены
+// ВЕРСИЯ: Определяется в app_config.h (FW_VERSION_STR)
 // -----------------------------------------------------------------------------
 
 #include <Arduino.h>
@@ -16,21 +14,51 @@
 #include "topics.h"
 #include "app_config.h"
 #include "bt_transport.h"
+#include "debug.h"
 
-// Внешние декларации
-extern void simulatorStart();     extern void simulatorStop();     extern bool simulatorIsRunning();
-extern void storageStart();       extern void storageStop();       extern bool storageIsRunning();
-extern void calculatorStart();    extern void calculatorStop();    extern bool calculatorIsRunning();
-extern void protocolStart();      extern void protocolStop();      extern bool protocolIsRunning();
-extern void klineStart();         extern void klineStop();         extern bool klineIsRunning();
-extern void climateStart();       extern void climateStop();       extern bool climateIsRunning();
-extern void realEngineStart();    extern void realEngineStop();    extern bool realEngineIsRunning();
+// =============================================================================
+// Внешние декларации модулей
+// =============================================================================
+
+extern void simulatorStart();
+extern void simulatorStop();
+extern bool simulatorIsRunning();
+
+extern void storageStart();
+extern void storageStop();
+extern bool storageIsRunning();
+
+extern void calculatorStart();
+extern void calculatorStop();
+extern bool calculatorIsRunning();
+
+extern void protocolStart();
+extern void protocolStop();
+extern bool protocolIsRunning();
+
+extern void klineStart();
+extern void klineStop();
+extern bool klineIsRunning();
+
+extern void climateStart();
+extern void climateStop();
+extern bool climateIsRunning();
+
+extern void realEngineStart();
+extern void realEngineStop();
+extern bool realEngineIsRunning();
+
 #if OLED_ENABLED
-extern void oledStart();          extern void oledStop();          extern bool oledIsRunning();
+extern void oledStart();
+extern void oledStop();
+extern bool oledIsRunning();
 #endif
 
-// OTA Task — ленивый запуск при ota_update (не в setup())
 extern bool otaIsInProgress();
+
+// =============================================================================
+// Функции перезапуска
+// =============================================================================
 
 static void restartSimulator()   { simulatorStop();  delay(100); simulatorStart(); }
 static void restartStorage()     { storageStop();    delay(100); storageStart(); }
@@ -44,162 +72,180 @@ static void restartDisplay()     { oledStop();       delay(100); oledStart(); }
 #endif
 
 // =============================================================================
-// setup
+// setup() — запуск всех модулей
 // =============================================================================
 
 void setup() {
+    // 1. Serial для отладки
     Serial.begin(115200);
     delay(2000);
+    
+   // 2. Приветствие — с форматированными макросами
+    DBG_NEWLINE();
+    DBG_PRINTLN("=== Car BKV2 Starting ===");
+    DBG_PRINTF("Firmware: v%s", FW_VERSION_STR);
+    DBG_PRINTF("Note: %s", FW_VERSION_NOTE);
+    DBG_PRINTLN("Architecture: DataRouter");
+    DBG_NEWLINE();
+    
+    // 3. Диагностика — с форматированными макросами
+    DBG_PRINTLN("=== System Diagnostics ===");
+    DBG_PRINTF("CPU Frequency: %d MHz", ESP.getCpuFreqMHz());
+    DBG_PRINTF("Free Heap: %u bytes", ESP.getFreeHeap());
+    DBG_PRINTF("Max Alloc Heap: %u bytes", ESP.getMaxAllocHeap());
+    DBG_PRINTLN("===========================");
+    DBG_NEWLINE();
 
-    Serial.println();
-    Serial.println("=== Car BKV2 Starting ===");
-    Serial.printf("Firmware: v%s\n", FW_VERSION_STR);
-    Serial.printf("Note: %s\n", FW_VERSION_NOTE);
-    Serial.println("Architecture: DataRouter (typed topics, module-owned queues)\n");
-
-    // 1. DataRouter
-    Serial.println("[SETUP] 1/9: DataRouter...");
+    // 4. DataRouter — первым!
+    DBG_PRINTLN("[SETUP] DataRouter...");
     DataRouter::getInstance().begin();
     delay(50);
-
-    // 2. BT Transport — ЗАПУСКАЕМ РАНЬШЕ ВСЕХ ЗАДАЧ (до фрагментации кучи)
-    Serial.println("[SETUP] 2/9: BT Transport...");
+    
+    // 5. BT Transport — критически важен, запускаем вторым
+    DBG_PRINTLN("[SETUP] BT Transport...");
     btTransportStart("Car Simulator");
-    delay(100);
-
-    // 3. Storage (публикует данные — кэш для остальных)
-    Serial.println("[SETUP] 3/9: Storage...");
+    delay(200);  // Даём Bluetooth-стеку время на инициализацию
+    
+    // 6. Storage
+    DBG_PRINTLN("[SETUP] Storage...");
     storageStart();
-    delay(100);
-
-    // 3. Engine (Simulator или Real)
+    delay(50);
+    
+    // 7. Simulator или RealEngine
 #if REAL_ENGINE_ENABLED
-    Serial.println("[SETUP] 4/9: Real Engine...");
+    DBG_PRINTLN("[SETUP] Real Engine...");
     realEngineStart();
 #else
-    Serial.println("[SETUP] 4/9: Simulator...");
+    DBG_PRINTLN("[SETUP] Simulator...");
     simulatorStart();
 #endif
-    delay(100);
-
-    // 4. Calculator
-    Serial.println("[SETUP] 5/9: Calculator...");
+    delay(50);
+    
+    // 8. Calculator
+    DBG_PRINTLN("[SETUP] Calculator...");
     calculatorStart();
-    delay(100);
-
-    // 5. Protocol
-    Serial.println("[SETUP] 6/9: Protocol...");
+    delay(50);
+    
+    // 9. Protocol
+    DBG_PRINTLN("[SETUP] Protocol...");
     protocolStart();
-    delay(100);
-
-    // 6. K-Line
-    Serial.println("[SETUP] 7/9: K-Line...");
+    delay(50);
+    
+    // 10. K-Line
+    DBG_PRINTLN("[SETUP] K-Line...");
     klineStart();
-    delay(100);
-
-    // 7. Climate
-    Serial.println("[SETUP] 8/9: Climate...");
+    delay(50);
+    
+    // 11. Climate
+    DBG_PRINTLN("[SETUP] Climate...");
     climateStart();
-    delay(100);
-
-    // 8. OLED
+    delay(50);
+    
+    // 12. OLED (опционально)
 #if OLED_ENABLED
-    Serial.println("[SETUP] 9/9: OLED...");
+    DBG_PRINTLN("[SETUP] OLED...");
     oledStart();
-#else
-    Serial.println("[SETUP] 7/7: Complete (no OLED)");
+    delay(50);
 #endif
-
-#if OLED_ENABLED
-    Serial.println("\n=== Setup Complete (Sim/Storage/Calc/Proto/BT/KLine/Climate/OLED) ===\n");
-#else
-    Serial.println("\n=== Setup Complete (Sim/Storage/Calc/Proto/BT/KLine/Climate) ===\n");
-#endif
-
-    // Даём BT стеку стабилизироваться перед рестартами задач
-    delay(1000);
-    Serial.printf("[SETUP] Free heap: %u bytes\n", (unsigned)ESP.getFreeHeap());
+    
+    DBG_NEWLINE();
+    DBG_PRINTLN("=== Setup Complete ===");
+    DBG_PRINTF("Free heap: %u bytes", ESP.getFreeHeap());
+    DBG_NEWLINE();
 }
 
 // =============================================================================
-// loop — Диспетчер процессов (упрощённый)
+// loop() — мониторинг задач
 // =============================================================================
 
 // Cooldown для рестартов — предотвращает "смертельную спираль"
-static unsigned long lastRestartKline = 0, lastRestartClimate = 0, lastRestartStorage = 0;
+static unsigned long lastRestartKline = 0;
+static unsigned long lastRestartClimate = 0;
+static unsigned long lastRestartStorage = 0;
 #if OLED_ENABLED
 static unsigned long lastRestartDisplay = 0;
 #endif
-#define RESTART_COOLDOWN_MS 2000  // Мин. 2 сек между рестартами
-
-// ⚠️ ВРЕМЕННО: отключён restart задач для отладки crash при подключении BT
-#define DISABLE_LOOP_RESTARTS  1
+#define RESTART_COOLDOWN_MS 5000  // 5 сек между рестартами
 
 void loop() {
+
+    // ПЕРВЫМ ДЕЛОМ — если OTA активен, ничего не делаем!
+    if (otaIsInProgress()) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+        return;
+    }
+
     static unsigned long lastCheck = 0;
     unsigned long now = millis();
-
-    // Heartbeat-мониторинг всех модулей
-    if (now - lastCheck >= 100) {
+    
+    // Проверяем состояние задач каждые 500 мс
+    if (now - lastCheck >= 500) {
         lastCheck = now;
-
-        // НЕ перезапускать задачи если OTA активен!
+        
+        // НЕ перезапускать задачи, если OTA активен!
         if (otaIsInProgress()) {
-            vTaskDelay(50 / portTICK_PERIOD_MS);
             return;
         }
-
-#if DISABLE_LOOP_RESTARTS
-        // --- Все рестарты отключены для теста ---
-        (void)lastRestartKline; (void)lastRestartClimate; (void)lastRestartStorage;
-        (void)RESTART_COOLDOWN_MS;
-#else
-        // Критичные модули — Engine (Sim или Real)
+        
+        // --- КРИТИЧНЫЕ МОДУЛИ ---
+        
+        // Engine (Simulator или Real)
 #if REAL_ENGINE_ENABLED
         if (!realEngineIsRunning()) {
-            Serial.println("[LOOP] CRITICAL: RealEngine crashed! Restarting...");
+            DBG_PRINTLN("[LOOP] CRITICAL: RealEngine crashed! Restarting...");
             restartRealEngine();
         }
 #else
         if (!simulatorIsRunning()) {
-            Serial.println("[LOOP] CRITICAL: Simulator crashed! Restarting...");
+            DBG_PRINTLN("[LOOP] CRITICAL: Simulator crashed! Restarting...");
             restartSimulator();
         }
 #endif
+        
+        // Storage
         if (!storageIsRunning() && (now - lastRestartStorage >= RESTART_COOLDOWN_MS)) {
             lastRestartStorage = now;
-            Serial.println("[LOOP] HIGH: Storage crashed! Restarting...");
+            DBG_PRINTLN("[LOOP] Storage crashed! Restarting...");
             restartStorage();
         }
+        
+        // Calculator
         if (!calculatorIsRunning()) {
-            Serial.println("[LOOP] CRITICAL: Calculator crashed! Restarting...");
+            DBG_PRINTLN("[LOOP] Calculator crashed! Restarting...");
             restartCalculator();
         }
+        
+        // Protocol
         if (!protocolIsRunning()) {
-            Serial.println("[LOOP] CRITICAL: Protocol crashed! Restarting...");
+            DBG_PRINTLN("[LOOP] Protocol crashed! Restarting...");
             restartProtocol();
         }
-
-        // Сервисные модули (с cooldown)
+        
+        // --- СЕРВИСНЫЕ МОДУЛИ (с cooldown) ---
+        
+        // K-Line
         if (!klineIsRunning() && (now - lastRestartKline >= RESTART_COOLDOWN_MS)) {
             lastRestartKline = now;
-            Serial.println("[LOOP] LOW: K-Line crashed! Restarting...");
+            DBG_PRINTLN("[LOOP] K-Line crashed! Restarting...");
             restartKline();
         }
+        
+        // Climate
         if (!climateIsRunning() && (now - lastRestartClimate >= RESTART_COOLDOWN_MS)) {
             lastRestartClimate = now;
-            Serial.println("[LOOP] LOW: Climate crashed! Restarting...");
+            DBG_PRINTLN("[LOOP] Climate crashed! Restarting...");
             restartClimate();
         }
+        
+        // OLED
 #if OLED_ENABLED
         if (!oledIsRunning() && (now - lastRestartDisplay >= RESTART_COOLDOWN_MS)) {
             lastRestartDisplay = now;
-            Serial.println("[LOOP] LOW: OLED crashed! Restarting...");
+            DBG_PRINTLN("[LOOP] OLED crashed! Restarting...");
             restartDisplay();
         }
 #endif
-#endif // DISABLE_LOOP_RESTARTS
     }
-
-    vTaskDelay(50 / portTICK_PERIOD_MS);
+    
+    vTaskDelay(100 / portTICK_PERIOD_MS);
 }

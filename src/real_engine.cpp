@@ -25,11 +25,19 @@
 //   - PCNT считает импульсы аппаратно (невозможно потерять)
 //   - Фильтр дребезга: 100 мкс (аппаратный)
 //
-// ВЕРСИЯ: 6.3.0 — MAJOR: RMT + PCNT (ESP-IDF v4.4.x), Toyota RAV4 2004, 3-режима калибровки
+// Обновление (интеграция с task_common):
+// - Использует taskInit() для инициализации и подписки на TOPIC_CMD
+// - Регистрирует подписки через taskRegisterSubscription()
+// - taskProcessCommands() обрабатывает CMD_OTA_START с полной очисткой ресурсов
+// - taskHeartbeat() обновляет счётчик для loop()-мониторинга
+// - При OTA освобождаются аппаратные драйверы (RMT, PCNT, I2C)
+//
+// ВЕРСИЯ: Определяется в app_config.h (FW_VERSION_STR)
 // -----------------------------------------------------------------------------
 
 #include "real_engine.h"
 #include "data_router.h"
+#include "task_common.h"
 #include "topics.h"
 #include "packets.h"
 #include "commands.h"
@@ -44,7 +52,7 @@ extern "C" {
 }
 
 // =============================================================================
-// Пином (Toyota RAV4 2004, 1AZ-FE / 2AZ-FE)
+// Пины (Toyota RAV4 2004, 1AZ-FE / 2AZ-FE)
 // =============================================================================
 
 #define INJECTOR_PIN   4     // Форсунка (оптопара 6N137, LOW = открыта)
@@ -63,17 +71,17 @@ extern "C" {
 #define DEAD_TIME_US         750     // Мёртвая зона форсунки (мкс) — калибровать
 #define DEAD_TIME_COEF       120.0f  // мкс/В (коррекция при просадке напряжения, Denso)
 #define MAX_INJECTOR_US    50000     // Макс. длительность впрыска (50 мс)
-#define RMT_FILTER_THRESH   50     // Фильтр шума < 50 мкс (аппаратный, RMT)
-#define PCNT_FILTER_VALUE  100     // Фильтр дребезга VSS (аппаратный, PCNT, мкс)
-#define RMT_CLK_DIV          80     // 80 МГц / 80 = 1 МГц (1 тик = 1 мкс)
+#define RMT_FILTER_THRESH   50       // Фильтр шума < 50 мкс (аппаратный, RMT)
+#define PCNT_FILTER_VALUE  100       // Фильтр дребезга VSS (аппаратный, PCNT, мкс)
+#define RMT_CLK_DIV          80      // 80 МГц / 80 = 1 МГц (1 тик = 1 мкс)
 
 // =============================================================================
 // Данные из RMT/PCNT (volatile)
 // =============================================================================
 
 static volatile uint64_t injectorTotalUs  = 0;     // Сумма длительностей (мкс) после dead time
-static volatile uint32_t injectorPulses  = 0;     // Количество валидных открытий
-static volatile uint32_t injectorMissed  = 0;     // Пропущенные (> MAX_INJECTOR_US)
+static volatile uint32_t injectorPulses   = 0;     // Количество валидных открытий
+static volatile uint32_t injectorMissed   = 0;     // Пропущенные (> MAX_INJECTOR_US)
 
 // =============================================================================
 // INA226 — напряжение бортсети (I2C, точное измерение)
@@ -168,13 +176,22 @@ static float    distanceAccum   = 0.0f;
 static float    fuelUsedAccum   = 0.0f;
 
 // =============================================================================
-// Очереди и задача
+// Глобальные переменные задачи
 // =============================================================================
 
 static TaskHandle_t  taskHandle    = NULL;
 static bool          isRunningFlag = false;
 static unsigned long lastHeartbeat = 0;
 
+// --- Контекст задачи (фреймворк task_common) ---
+// Внедрение фреймворка task_common:
+//   - Автоматическая обработка CMD_OTA_START с полной очисткой ресурсов
+//   - Единый heartbeat для мониторинга в loop()
+//   - Регистрация подписок для корректной отписки при завершении
+static TaskContext ctx = {0};
+
+// --- Очереди для подписки на данные ---
+// Создаются модулем, регистрируются через taskRegisterSubscription()
 static QueueHandle_t cmdQ        = NULL;
 static QueueHandle_t settingsQ   = NULL;
 static QueueHandle_t tripQ       = NULL;
@@ -300,29 +317,70 @@ static void processRMTData() {
 }
 
 // =============================================================================
-// processCommands
+// readFuelAdc — чтение датчика уровня топлива (ADC, сглаживание)
 // =============================================================================
+//
+// Возвращает: напряжение в Вольтах (0-3.3В)
+// Сглаживание: скользящее среднее из 16 измерений
+//
+static float readFuelAdc() {
+    static float adcSmooth = 0;      // Сглаженное значение
+    static bool  initialized = false;
 
-static void processCommands() {
-    uint8_t cmd;
-    while (xQueueReceive(cmdQ, &cmd, 0) == pdTRUE) {
+    if (!initialized) {
+        // Первый замер — инициализация
+        int rawSum = 0;
+        for (int i = 0; i < 16; i++) {
+            rawSum += analogRead(FUEL_LEVEL_PIN);
+            delay(2);
+        }
+        adcSmooth = (rawSum / 16) * (3.3f / 4095.0f);
+        initialized = true;
+        return adcSmooth;
+    }
+
+    // Экспоненциальное сглаживание: α = 0.25
+    int raw = analogRead(FUEL_LEVEL_PIN);
+    float volts = raw * (3.3f / 4095.0f);
+    adcSmooth = adcSmooth * 0.75f + volts * 0.25f;
+
+    return adcSmooth;
+}
+
+// =============================================================================
+// realEngineCmdHandler — обработка специфичных команд модуля RealEngine
+// =============================================================================
+// Вызывается из taskProcessCommands() для каждой полученной команды.
+// CMD_OTA_START обрабатывается автоматически во фреймворке, сюда не попадает.
+//
+// Параметры:
+//   cmd — код команды (enum Command)
+//
+// Возвращает:
+//   true  — команда обработана
+//   false — команда не распознана (будет залогировано фреймворком)
+//
+static bool realEngineCmdHandler(uint8_t cmd) {
+    switch ((Command)cmd) {
         // --- FULL_TANK: Заправка ---
-        if ((Command)cmd == CMD_FULL_TANK) {
+        case CMD_FULL_TANK:
             fuelBase = tankCapacity;
             fuelLevel = tankCapacity;
             DBG_PRINTF("[RealEngine] Full tank: %.1f L\n", fuelLevel);
-        }
+            return true;
+            
         // --- CALIBRATE_SPEED: Старт калибровки VSS ---
-        else if ((Command)cmd == CMD_CALIBRATE_SPEED) {
+        case CMD_CALIBRATE_SPEED:
             pcnt_counter_clear(PCNT_UNIT_0);
             calSpeedPulses = 0;
             calSpeedActive = true;
             DBG_PRINTLN("[RealEngine] === CALIBRATION VSS START ===");
             DBG_PRINTLN("[RealEngine] Drive known distance (e.g. 1 km)");
             DBG_PRINTLN("[RealEngine] Then send calibrate_speed_end with distance_m");
-        }
+            return true;
+            
         // --- CALIBRATE_INJECTOR: Старт калибровки форсунки ---
-        else if ((Command)cmd == CMD_CALIBRATE_INJECTOR) {
+        case CMD_CALIBRATE_INJECTOR:
             calInjectorTotalUs = 0;
             calInjectorPulses = 0;
             calInjectorActive = true;
@@ -331,9 +389,10 @@ static void processCommands() {
             DBG_PRINTLN("[RealEngine] === CALIBRATION INJECTOR START ===");
             DBG_PRINTLN("[RealEngine] Fill tank FULL, drive normally");
             DBG_PRINTLN("[RealEngine] Then send calibrate_injector_end with fuel_liters");
-        }
+            return true;
+            
         // --- CALIBRATE_DEADTIME: Старт калибровки dead time ---
-        else if ((Command)cmd == CMD_CALIBRATE_DEADTIME) {
+        case CMD_CALIBRATE_DEADTIME:
             calDeadTimeTotalUs = 0;
             calDeadTimeFuelUsed = 0;
             calDeadTimeActive = true;
@@ -341,14 +400,64 @@ static void processCommands() {
             DBG_PRINTLN("[RealEngine] Idle engine for 5-10 minutes (warm)");
             DBG_PRINTLN("[RealEngine] Measure real fuel consumption (ml/min)");
             DBG_PRINTLN("[RealEngine] Then send calibrate_deadtime_end with fuel_ml_per_min");
-        }
-        // --- OTA START: Завершение задачи (освобождение памяти) ---
-        else if ((Command)cmd == CMD_OTA_START) {
-            DBG_PRINTLN("[RealEngine] CMD_OTA_START — shutting down");
-            isRunningFlag = false;
-            vTaskDelete(NULL);
-        }
+            return true;
+
+        // CMD_OTA_START здесь НЕ обрабатывается — это делает фреймворк task_common
+
+        default:
+            return false;  // Команда не распознана
     }
+}
+
+// =============================================================================
+// realEnginePreShutdownCleanup — освобождение аппаратных драйверов перед OTA
+// =============================================================================
+// Вызывается из taskProcessCommands() при получении CMD_OTA_START
+// ДО вызова taskShutdown().
+//
+// Освобождает:
+//   - RMT driver (rmt_driver_uninstall)
+//   - PCNT (остановка счётчика)
+//   - I2C (Wire.end())
+//
+// ВАЖНО: эта функция НЕ должна вызывать taskShutdown или vTaskDelete,
+// она только освобождает специфичные для модуля аппаратные ресурсы.
+//
+static void realEnginePreShutdownCleanup(void) {
+    DBG_PRINTLN("[RealEngine] Pre-shutdown cleanup: releasing hardware drivers...");
+    
+    // Остановка и удаление RMT драйвера
+    rmt_rx_stop(RMT_CHANNEL_0);
+    rmt_driver_uninstall(RMT_CHANNEL_0);
+    
+    // Остановка PCNT
+    pcnt_counter_pause(PCNT_UNIT_0);
+    pcnt_counter_clear(PCNT_UNIT_0);
+    
+    // Закрытие I2C (если был инициализирован)
+    if (inaReady) {
+        Wire.end();
+    }
+    
+    DBG_PRINTLN("[RealEngine] Hardware drivers released");
+}
+
+// =============================================================================
+// realEngineCmdHandlerWithCleanup — расширенный обработчик с очисткой
+// =============================================================================
+// Обёртка над realEngineCmdHandler, которая также вызывает очистку аппаратных
+// драйверов при получении CMD_OTA_START.
+//
+static bool realEngineCmdHandlerWithCleanup(uint8_t cmd) {
+    if ((Command)cmd == CMD_OTA_START) {
+        // Освобождаем аппаратные драйверы ДО вызова taskShutdown()
+        realEnginePreShutdownCleanup();
+        // Возвращаем false — фреймворк продолжит обработку и вызовет taskShutdown()
+        return false;
+    }
+    
+    // Для остальных команд — обычный обработчик
+    return realEngineCmdHandler(cmd);
 }
 
 // =============================================================================
@@ -417,7 +526,6 @@ static void processCalibrate() {
         }
         else if (!calSpeedActive && value > 0 && value < 10000) {
             // Это не калибровка VSS — возможно injector или deadtime
-            // Завершение калибровки форсунки (value = литры)
         }
 
         // --- Завершение калибровки форсунки (value = литры) ---
@@ -425,10 +533,8 @@ static void processCalibrate() {
             float realFuelLiters = (float)value / 100.0f;  // Android шлёт в см (например 500 = 5.00л)
 
             // Расчёт: injector_flow = (real_fuel_liters / injector_total_sec) * 60 / injector_count
-            // injector_total_sec = calInjectorTotalUs / 1000000
             float totalSec = (float)calInjectorTotalUs / 1000000.0f;
             if (totalSec > 0 && calInjectorPulses > 0) {
-                // injectorFlow (мл/мин) = (realFuelLiters * 1000) / totalSec * 60 / injectorCount
                 injectorFlow = (realFuelLiters * 1000.0f / totalSec * 60.0f) / injectorCount;
 
                 // Сохраняем
@@ -457,27 +563,15 @@ static void processCalibrate() {
             float realFuelMlPerMin = (float)value;  // мл/мин
 
             // Расчёт: dead_time = total_us - (real_fuel_ml / (injector_flow * injector_count / 60000))
-            // real_fuel_ml_per_sec = realFuelMlPerMin / 60
-            // ideal_total_us = real_fuel_ml / (injector_flow * injector_count / 60000)
-            // dead_time = (total_raw_us - ideal_total_us) / pulses
             float realFuelMlPerSec = realFuelMlPerMin / 60.0f;
             float idealTotalSec = realFuelMlPerSec / (injectorFlow * injectorCount / 60000.0f);
             float idealTotalUs = idealTotalSec * 1000000.0f;
 
             if (calInjectorPulses > 0) {
-                // dead_time = (raw_total_us - ideal_total_us) / pulses
-                // Но мы уже храним corrected_total_us, нужно raw_total_us
-                // Для упрощения: dead_time = (ideal_total_us) / pulses * correction
-                float deadTimePerPulse = (calDeadTimeTotalUs / calInjectorPulses);
-                // Подбираем dead_time чтобы расход совпадал
-                // Новая формула: dead_time = old_dead_time * (1 - error)
-                // Упрощённо: корректируем на основе расхождения
-
                 float oldDeadTime = DEAD_TIME_US;
                 float error = 1.0f - (realFuelMlPerMin / (injectorFlow * injectorCount / 60.0f * (calInjectorPulses / 600.0f)));
                 float newDeadTime = oldDeadTime * (1.0f + error * 0.1f);  // Плавная корректировка
 
-                // Ограничиваем разумным диапазоном
                 newDeadTime = constrain(newDeadTime, 400.0f, 1200.0f);
 
                 DBG_PRINTF("[RealEngine] === CALIBRATION DEAD TIME END ===\n");
@@ -495,58 +589,69 @@ static void processCalibrate() {
 }
 
 // =============================================================================
-// readFuelAdc — чтение датчика уровня топлива (ADC, сглаживание)
-// =============================================================================
-//
-// Возвращает: напряжение в Вольтах (0-3.3В)
-// Сглаживание: скользящее среднее из 16 измерений
-//
-static float readFuelAdc() {
-    static float adcSmooth = 0;      // Сглаженное значение
-    static bool  initialized = false;
-
-    if (!initialized) {
-        // Первый замер — инициализация
-        int rawSum = 0;
-        for (int i = 0; i < 16; i++) {
-            rawSum += analogRead(FUEL_LEVEL_PIN);
-            delay(2);
-        }
-        adcSmooth = (rawSum / 16) * (3.3f / 4095.0f);
-        initialized = true;
-        return adcSmooth;
-    }
-
-    // Экспоненциальное сглаживание: α = 0.25
-    int raw = analogRead(FUEL_LEVEL_PIN);
-    float volts = raw * (3.3f / 4095.0f);
-    adcSmooth = adcSmooth * 0.75f + volts * 0.25f;
-
-    return adcSmooth;
-}
-
-// =============================================================================
 // realEngineTask
 // =============================================================================
-
+//
+// Архитектура на основе task_common:
+//   1. taskInit() — инициализация, создание cmdQ, подписка на TOPIC_CMD
+//   2. Инициализация аппаратных драйверов (RMT, PCNT, INA226, ADC)
+//   3. Создание очередей и подписка на топики данных
+//   4. Основной цикл:
+//      - taskHeartbeat() — обновление счётчика активности
+//      - Обработка очередей данных
+//      - processRMTData() — чтение данных форсунки
+//      - taskProcessCommands() — обработка команд (включая OTA)
+//      - Публикация EnginePack каждые 100 мс
+//
+// При получении CMD_OTA_START:
+//   - realEngineCmdHandlerWithCleanup() вызывает realEnginePreShutdownCleanup()
+//   - taskProcessCommands() вызывает taskShutdown()
+//   - taskShutdown() отписывается от топиков, удаляет очереди, завершает задачу
+//   - Память и аппаратные драйверы полностью освобождаются для OTA-обновления
+//
 static void realEngineTask(void* parameter) {
     (void)parameter;
-    isRunningFlag = true;
+    
+    // === ИНИЦИАЛИЗАЦИЯ ЧЕРЕЗ ФРЕЙМВОРК ===
+    // taskInit() выполняет:
+    //   - Установку isRunningFlag = true
+    //   - Создание cmdQ (очередь команд)
+    //   - Подписку на TOPIC_CMD
+    //   - Регистрацию подписки для автоматической очистки при shutdown
+    if (!taskInit(&ctx, "RealEngine", &isRunningFlag, &lastHeartbeat)) {
+        DBG_PRINTLN("[RealEngine] ERROR: taskInit failed!");
+        isRunningFlag = false;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Сохраняем указатель на cmdQueue для совместимости
+    cmdQ = ctx.cmdQ;
+    
     DataRouter& router = DataRouter::getInstance();
 
-    // Создаём очереди
-    cmdQ         = xQueueCreate(5, sizeof(uint8_t));
+    // === СОЗДАНИЕ ОЧЕРЕДЕЙ И ПОДПИСКА НА ТОПИКИ ===
     settingsQ    = xQueueCreate(1, sizeof(SettingsPack));
     tripQ        = xQueueCreate(1, sizeof(TripPack));
     calibrateQ   = xQueueCreate(1, sizeof(int));
 
-    // Подписка
-    router.subscribe(TOPIC_CMD, cmdQ, QueuePolicy::FIFO_DROP);
+    if (!settingsQ || !tripQ || !calibrateQ) {
+        DBG_PRINTLN("[RealEngine] ERROR: Failed to create queues!");
+        isRunningFlag = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
     router.subscribe(TOPIC_SETTINGS_PACK, settingsQ, QueuePolicy::OVERWRITE, true);
     router.subscribe(TOPIC_TRIP_PACK, tripQ, QueuePolicy::OVERWRITE, true);
     router.subscribe(TOPIC_CALIBRATE_DIST, calibrateQ, QueuePolicy::OVERWRITE);
 
-    // Инициализация RMT + PCNT
+    // Регистрируем подписки для автоматической отписки при shutdown
+    taskRegisterSubscription(&ctx, TOPIC_SETTINGS_PACK, settingsQ);
+    taskRegisterSubscription(&ctx, TOPIC_TRIP_PACK, tripQ);
+    taskRegisterSubscription(&ctx, TOPIC_CALIBRATE_DIST, calibrateQ);
+
+    // === ИНИЦИАЛИЗАЦИЯ АППАРАТНЫХ ДРАЙВЕРОВ ===
     initRMT();
     initPCNT();
 
@@ -565,23 +670,27 @@ static void realEngineTask(void* parameter) {
     DBG_PRINTF("[RealEngine] Fuel level ADC initialized (GPIO%d, 12-bit)\n",
                   FUEL_LEVEL_PIN);
 
-    DBG_PRINTF("[RealEngine] Started (RMT=GPIO%d, PCNT=GPIO%d, ADC=GPIO%d)\n",
+    DBG_PRINTF("[RealEngine] Started (RMT=GPIO%d, PCNT=GPIO%d, ADC=GPIO%d, task_common framework)\n",
                   INJECTOR_PIN, SHAFT_PIN, FUEL_LEVEL_PIN);
 
     unsigned long lastPublish = 0;
     float speedAccum = 0;
 
     while (1) {
-        lastHeartbeat = millis();
+        // Heartbeat — обновление счётчика для loop()-мониторинга
+        taskHeartbeat(&ctx);
 
-        // Обработка очередей
-        processCommands();
+        // Обработка очередей данных
         processSettingsPack();
         processTripPack();
         processCalibrate();
 
         // Чтение RMT буфера (неблокирующее, выгребает накопленное)
         processRMTData();
+
+        // Обработка команд (CMD_OTA_START обрабатывается автоматически)
+        // Используем расширенный обработчик с очисткой аппаратных драйверов
+        taskProcessCommands(&ctx, realEngineCmdHandlerWithCleanup);
 
         // Публикация EnginePack каждые 100 мс
         unsigned long now = millis();
@@ -634,7 +743,6 @@ static void realEngineTask(void* parameter) {
             float fuelSensorVolts = readFuelAdc();  // Читаем ADC (сглаживание)
 
             if (fuelSensorVolts > 0.1f) {  // Валидное чтение
-                // Поплавок: полный бак = 0 Ом = БОЛЬШЕ напряжение
                 float range = fuelAdcFull - fuelAdcEmpty;
                 if (range > 0.01f) {  // Избегаем деления на ноль
                     fuelSensorPct = (fuelSensorVolts - fuelAdcEmpty) / range * 100.0f;
@@ -691,19 +799,28 @@ void realEngineStart() {
         // Ядро 0 — RealEngine (ISR, RMT, PCNT — аппаратные драйверы)
         xTaskCreatePinnedToCore(realEngineTask, "RealEng", TASK_STACK_SIZE, NULL,
                                 TASK_PRIORITY_SIMULATOR, &taskHandle, 0);
+        DBG_PRINTLN("[RealEngine] Started (Core 0, task_common framework)");
     }
 }
 
 void realEngineStop() {
     if (taskHandle) {
+        // Освобождаем аппаратные драйверы перед удалением задачи
         rmt_rx_stop(RMT_CHANNEL_0);
         rmt_driver_uninstall(RMT_CHANNEL_0);
         pcnt_counter_pause(PCNT_UNIT_0);
         pcnt_counter_clear(PCNT_UNIT_0);
+        if (inaReady) {
+            Wire.end();
+        }
+        
         vTaskDelete(taskHandle);
         taskHandle = NULL;
         isRunningFlag = false;
+        DBG_PRINTLN("[RealEngine] Stopped");
     }
 }
 
-bool realEngineIsRunning() { return isRunningFlag && (millis() - lastHeartbeat) < 3000; }
+bool realEngineIsRunning() { 
+    return isRunningFlag && (millis() - lastHeartbeat) < 3000; 
+}

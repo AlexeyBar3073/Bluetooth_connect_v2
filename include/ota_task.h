@@ -9,12 +9,19 @@
 //   - OTA Task обрабатывает чанки из TOPIC_OTA_CHUNK_PACK
 //   - CMD_OTA_END → Update.end() → ESP.restart()
 //
-// ВЕРСИЯ: 6.8.19 — OTA Task стартует в setup(), как все задачи
+// Обновление (интеграция с task_common):
+// - Использует taskInit() для унифицированной инициализации
+// - Единый heartbeat для мониторинга в loop()
+// - OTA Task НЕ завершается при CMD_OTA_START (он активируется)
+// - При CMD_OTA_END выполняет Update.end() и перезагрузку
+//
+// ВЕРСИЯ: Определяется в app_config.h (FW_VERSION_STR)
 // -----------------------------------------------------------------------------
 
 #ifndef OTA_TASK_H
 #define OTA_TASK_H
 
+#include "debug.h"
 #include <Arduino.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -25,7 +32,7 @@
 // =============================================================================
 
 #define OTA_CHUNK_BIN_SIZE   1024   // Бинарные данные за чанк (байт)
-#define OTA_CHUNK_B64_SIZE   1368   // Base64-представление 1024 байт (~1368 символа)
+#define OTA_CHUNK_B64_SIZE   1368   // Base64-представление 1024 байт (~1368 символов)
 #define OTA_DECODE_BUF_SIZE  1536   // Буфер декодирования (с запасом)
 #define OTA_MAX_CHUNKS       8192   // Максимум чанков (~2 МБ)
 
@@ -45,12 +52,14 @@ typedef struct {
     }
 
 #if DEBUG_LOG
+    // Подключаем debug.h только когда DEBUG_LOG включен
+    #include "debug.h"
     void print() const {
         char preview[12];
         size_t n = (b64_len < 10) ? b64_len : 10;
         memcpy(preview, b64, n);
         preview[n] = '\0';
-        Serial.printf("[OtaChunk] pack=%u, crc=%04X, len=%u, preview=\"%s\"\n",
+        DBG_PRINTF("[OtaChunk] pack=%u, crc=%04X, len=%u, preview=\"%s\"\n",
                       pack, crc16, b64_len, preview);
     }
 #endif
@@ -65,6 +74,9 @@ static_assert(sizeof(OtaChunkPack) <= 1400, "OtaChunkPack too large!");
 
 // Вызывается в setup() — запускает задачу OTA
 void otaTaskStart();
+
+// Вызывается в loop() для остановки задачи OTA (при необходимости)
+void otaTaskStop();
 
 // Вызывается из protocol_task при ota_update — инициализирует Update
 void otaBeginUpdate(size_t firmwareSize);

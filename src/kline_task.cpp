@@ -24,15 +24,17 @@
 //   - Формировать JSON или публиковать в TOPIC_MSG_OUTGOING
 //   - Оперировать msg_id / ack_id
 //
-// ВЕРСИЯ: 6.1.0 — K-Line на DataRouter (typed topics, module-owned queues)
+// ВЕРСИЯ: Определяется в app_config.h (FW_VERSION_STR)
 // -----------------------------------------------------------------------------
 
 #include "kline_task.h"
 #include "data_router.h"
+#include "task_common.h"
 #include "topics.h"
 #include "packets.h"
 #include "commands.h"
 #include "app_config.h"
+#include "debug.h"
 
 // =============================================================================
 // Глобальные переменные
@@ -44,7 +46,15 @@ static unsigned long lastHeartbeat  = 0;
 static int           currentProtocol = 0;
 static bool          isRealMode     = false;
 
+// --- Контекст задачи (фреймворк task_common) ---
+// Внедрение фреймворка task_common (v6.8.22+):
+//   - Автоматическая обработка CMD_OTA_START с полной очисткой ресурсов
+//   - Единый heartbeat для мониторинга в loop()
+//   - Регистрация подписок для корректной отписки при завершении
+static TaskContext ctx = {0};
+
 // --- Очередь команд (создаётся модулем) ---
+// Примечание: теперь очередь создаётся автоматически через taskInit()
 static QueueHandle_t cmdQueue = NULL;
 
 // --- Тестовые данные ---
@@ -66,91 +76,96 @@ static void updateTestData() {
 }
 
 // =============================================================================
-// processCommands: Обработка очереди команд TOPIC_CMD
+// klineCmdHandler — обработка специфичных команд модуля K-Line
 // =============================================================================
-static void processCommands() {
-    uint8_t cmd;
-    while (xQueueReceive(cmdQueue, &cmd, 0) == pdTRUE) {
-        switch ((Command)cmd) {
-            case CMD_KL_GET_DTC:
-#if DEBUG_LOG
-                Serial.println("[KLine] DTC request received (will update KlinePack)");
-#endif
-                break;
+// Вызывается из taskProcessCommands() для каждой полученной команды.
+// CMD_OTA_START обрабатывается автоматически во фреймворке, сюда не попадает.
+//
+// Параметры:
+//   cmd — код команды (enum Command)
+//
+// Возвращает:
+//   true  — команда обработана
+//   false — команда не распознана (будет залогировано фреймворком)
+//
+static bool klineCmdHandler(uint8_t cmd) {
+    switch ((Command)cmd) {
+        case CMD_KL_GET_DTC:
+            DBG_PRINTLN("[KLine] DTC request received (will update KlinePack)");
+            return true;
 
-            case CMD_KL_CLEAR_DTC:
-                testDtcCount = 0;
-                memset(testDtcCodes, 0, sizeof(testDtcCodes));
-#if DEBUG_LOG
-                Serial.println("[KLine] DTC cleared");
-#endif
-                break;
+        case CMD_KL_CLEAR_DTC:
+            testDtcCount = 0;
+            memset(testDtcCodes, 0, sizeof(testDtcCodes));
+            DBG_PRINTLN("[KLine] DTC cleared");
+            return true;
 
-            case CMD_KL_RESET_ADAPT:
-#if DEBUG_LOG
-                Serial.println("[KLine] TCM adaptation reset requested");
-#endif
-                break;
+        case CMD_KL_RESET_ADAPT:
+            DBG_PRINTLN("[KLine] TCM adaptation reset requested");
+            return true;
 
-            case CMD_KL_PUMP_ATF:
-#if DEBUG_LOG
-                Serial.println("[KLine] ATF pump requested");
-#endif
-                break;
+        case CMD_KL_PUMP_ATF:
+            DBG_PRINTLN("[KLine] ATF pump requested");
+            return true;
 
-            case CMD_KL_DETECT_PROTO:
-                currentProtocol = 1;
-#if DEBUG_LOG
-                Serial.println("[KLine] Protocol detection requested");
-#endif
-                break;
+        case CMD_KL_DETECT_PROTO:
+            currentProtocol = 1;
+            DBG_PRINTLN("[KLine] Protocol detection requested");
+            return true;
 
-            case CMD_OTA_START:
-                Serial.println("[KLine] CMD_OTA_START — shutting down");
-                isRunningFlag = false;
-                // Безопасный выход — FreeRTOS удалит TCB.
-                // klineStop() вызовется из loop() и очистит taskHandle.
-                return;
-                break;
+        case CMD_OTA_START:
+            return true;  // Завершить задачу при OTA
 
-            default:
-                break;
-        }
+        default:
+            return false;  // Команда не распознана
     }
 }
 
 // =============================================================================
 // klineTask — Главная задача
 // =============================================================================
-
+//
+// Архитектура на основе task_common (обновлено в v6.8.22):
+//   1. taskInit() — инициализация, создание cmdQ, подписка на TOPIC_CMD
+//   2. Основной цикл:
+//      - taskHeartbeat() — обновление счётчика активности
+//      - taskProcessCommands() — обработка команд (включая OTA)
+//      - Публикация KlinePack каждые 1000 мс
+//
+// При получении CMD_OTA_START:
+//   - taskProcessCommands() вызывает taskShutdown()
+//   - taskShutdown() отписывается от топиков, удаляет очереди, завершает задачу
+//   - Память полностью освобождается для OTA-обновления
+//
 void klineTask(void* parameter) {
     (void)parameter;
-    isRunningFlag = true;
-    DataRouter& router = DataRouter::getInstance();
-
-    // Создаём очередь для команд (модуль сам создаёт очередь)
-    cmdQueue = xQueueCreate(5, sizeof(uint8_t));
-    if (cmdQueue == NULL) {
-        Serial.println("[KLine] ERROR: Failed to create command queue!");
+    
+    // === ИНИЦИАЛИЗАЦИЯ ЧЕРЕЗ ФРЕЙМВОРК ===
+    // taskInit() заменяет ручное создание cmdQueue и подписку на TOPIC_CMD.
+    // Все подписки, созданные модулем, должны быть зарегистрированы через
+    // taskRegisterSubscription() для автоматической очистки при shutdown.
+    if (!taskInit(&ctx, "KLine", &isRunningFlag, &lastHeartbeat)) {
+        DBG_PRINTLN("[KLine] ERROR: taskInit failed!");
         isRunningFlag = false;
         vTaskDelete(NULL);
         return;
     }
-
-    // Подписка на команды (FIFO_DROP — не терять команды)
-    router.subscribe(TOPIC_CMD, cmdQueue, QueuePolicy::FIFO_DROP);
-
-#if DEBUG_LOG
-    Serial.println("[KLine] Task started (DataRouter, simulation mode)");
-#endif
+    
+    // Сохраняем указатель на cmdQueue для обратной совместимости
+    // (используется в klineStop() для проверки)
+    cmdQueue = ctx.cmdQ;
+    
+    DataRouter& router = DataRouter::getInstance();
 
     unsigned long lastPublish = 0;
 
     while (1) {
-        lastHeartbeat = millis();
-
-        // Обработка команд
-        processCommands();
+        // Heartbeat — обновление счётчика для loop()-мониторинга
+        taskHeartbeat(&ctx);
+        
+        // Обработка команд (CMD_OTA_START обрабатывается автоматически)
+        // При получении CMD_OTA_START эта функция НЕ ВОЗВРАЩАЕТСЯ
+        taskProcessCommands(&ctx, klineCmdHandler);
 
         // Публикация KlinePack каждые 1000 мс
         unsigned long now = millis();
@@ -190,9 +205,6 @@ void klineStart() {
         isRunningFlag = true;
         // Ядро 1 — K-Line (диагностика ЭБУ)
         xTaskCreatePinnedToCore(klineTask, "KLine", TASK_STACK_SIZE, NULL, TASK_PRIORITY_KLINE, &taskHandle, 1);
-#if DEBUG_LOG
-        Serial.println("[KLine] Started (P1)");
-#endif
     }
 }
 
@@ -204,9 +216,10 @@ void klineStop() {
     isRunningFlag = false;
     // НЕ удаляем очередь — при рестарте создастся новая, старая освободится кучей.
     // vQueueDelete при асинхронных рестартах вызывает гонки и assert pxQueue.
+    // Примечание: при CMD_OTA_START очередь корректно удаляется через taskShutdown()
     cmdQueue = NULL;
 #if DEBUG_LOG
-    Serial.println("[KLine] Stopped (safe shutdown)");
+    DBG_PRINTLN("[KLine] Stopped (safe shutdown)");
 #endif
 }
 
@@ -218,5 +231,3 @@ void klineRequestDTC() {}
 void klineClearDTC() {}
 void klineResetTCMAdaptation() {}
 void klineStartABSBleed() {}
-
-
